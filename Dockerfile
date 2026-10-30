@@ -41,7 +41,9 @@ RUN pip install --upgrade pip && pip install .
 COPY vendor/buddy2api/requirements.txt /tmp/buddy2api-requirements.txt
 RUN pip install -r /tmp/buddy2api-requirements.txt
 
-RUN pip install "supervisor==4.2.5"
+# Supervisor 4.2.5 imports pkg_resources; Python 3.12 venvs no longer ship
+# setuptools by default, so install it explicitly.
+RUN pip install "setuptools==84.2.1" "supervisor==4.2.5"
 
 COPY vendor/buddy2api /opt/buddy2api
 COPY deploy /app/deploy
