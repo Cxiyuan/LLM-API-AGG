@@ -74,6 +74,7 @@ class _FakeCatalogBridge:
 
     def __init__(self, entries: list[dict]):
         self.entries = entries
+        self.config_calls: list[str] = []
 
     async def refresh_models(self) -> dict:
         return {}
@@ -84,6 +85,7 @@ class _FakeCatalogBridge:
     async def workbuddy_config(
         self, provider: str = "workbuddy", identity: str = "current", force: bool = False
     ) -> dict:
+        self.config_calls.append(provider)
         return {
             "models": [],
             "promotions_available": False,
@@ -120,4 +122,38 @@ async def test_refresh_filters_pseudo_and_media_models(tmp_path):
     assert result[0]["filtered"] == 5
     # 旧行即使还在库里，也不能再被查询/绑定
     assert catalog.effective_cost("workbuddy", "kling-video-v3") is None
+    db.close()
+
+
+async def test_realm_without_account_is_skipped_without_warning(tmp_path):
+    """未登录的区域不去探测 config，也不写 no_account 警告。"""
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    store.upsert_account(
+        {
+            "id": 1,
+            "provider": "workbuddy",
+            "name": "cn",
+            "status": "active",
+            "weight": 1,
+            "priority": 0,
+        }
+    )
+    bridge = _FakeCatalogBridge([
+        {"id": "deepseek-v4-flash", "channel": "workbuddy", "name": "Deepseek-V4-Flash", "credits": 0.17},
+    ])
+    catalog = WorkBuddyCatalog(store, bridge)  # both realms
+    results = await catalog.refresh()
+    by_provider = {item["provider"]: item for item in results}
+
+    # Only the realm with an account is probed.
+    assert bridge.config_calls == ["workbuddy"]
+    intl = by_provider["workbuddy-i"]
+    assert intl["skipped"] == "no_account"
+    assert intl["warning"] is None
+    assert store.latest_config_snapshot("workbuddy-i") is None
+
+    cn = store.latest_config_snapshot("workbuddy")
+    assert cn is not None
+    assert cn["warning"] == "promotions_unavailable"
     db.close()

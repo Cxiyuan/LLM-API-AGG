@@ -53,9 +53,23 @@ class WorkBuddyCatalog:
             await self.bridge.refresh_models()
         except BridgeError as exc:
             log.warning("bridge model refresh failed: %s", exc)
+        # A realm with no logged-in account has no config to read; probing it
+        # returns 409 no_account and used to surface as a permanent console
+        # warning. Skip the probe and record no warning for those realms.
+        with_accounts = {
+            str(account.get("provider") or "")
+            for account in self.store.list_accounts(present=True)
+        }
         results: list[dict] = []
         for provider in self.providers:
-            results.append(await self._refresh_provider(provider, identity, force=force))
+            results.append(
+                await self._refresh_provider(
+                    provider,
+                    identity,
+                    force=force,
+                    has_account=provider in with_accounts,
+                )
+            )
         return results
 
     async def _served_models(self, provider: str) -> list[dict]:
@@ -85,7 +99,9 @@ class WorkBuddyCatalog:
             current["id"] = model_id
         return list(merged.values())
 
-    async def _refresh_provider(self, provider: str, identity: str, *, force: bool) -> dict:
+    async def _refresh_provider(
+        self, provider: str, identity: str, *, force: bool, has_account: bool = True
+    ) -> dict:
         served: list[dict] = []
         served_error = None
         try:
@@ -93,14 +109,31 @@ class WorkBuddyCatalog:
         except BridgeError as exc:
             served_error = f"served list: HTTP {exc.status_code}: {exc}"[:300]
 
+        # No logged-in account for this realm means there is no config to read
+        # (the bridge answers 409 no_account). Skip it quietly instead of
+        # surfacing a permanent warning in the console.
+        if not has_account and not served:
+            return {
+                "provider": provider,
+                "ok": True,
+                "models": 0,
+                "filtered": 0,
+                "promotions": 0,
+                "warning": None,
+                "skipped": "no_account",
+                "served_error": served_error,
+                "config_error": None,
+            }
+
         config: dict | None = None
         config_error = None
-        try:
-            config = await self.bridge.workbuddy_config(
-                provider, identity=identity, force=force
-            )
-        except BridgeError as exc:
-            config_error = f"config: HTTP {exc.status_code}: {exc}"[:300]
+        if has_account:
+            try:
+                config = await self.bridge.workbuddy_config(
+                    provider, identity=identity, force=force
+                )
+            except BridgeError as exc:
+                config_error = f"config: HTTP {exc.status_code}: {exc}"[:300]
 
         if served:
             by_id = {}
@@ -152,7 +185,10 @@ class WorkBuddyCatalog:
                 warning = None
             else:
                 promotion_count = 0
-                warning = "promotions_unavailable" if config else (config_error or "config_failed")
+                if not has_account:
+                    warning = None
+                else:
+                    warning = "promotions_unavailable" if config else (config_error or "config_failed")
             self.store.record_config_snapshot(
                 provider=provider,
                 account_id=(config or {}).get("account_id"),
