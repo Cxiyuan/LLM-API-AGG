@@ -13,6 +13,7 @@ from ..util import utcnow_iso
 from .accounts import WorkBuddyAccounts
 from .bridge import BuddyBridge
 from .catalog import WorkBuddyCatalog, cost_summary
+from .direct import DirectSource
 from .gateway import PoolGateway
 from .reconcile import Reconciler
 from .router import PoolRouter
@@ -41,8 +42,12 @@ class WorkBuddyService:
         )
         self.catalog = WorkBuddyCatalog(self.store, self.bridge)
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)
-        self.router = PoolRouter(self.store, self.catalog)
-        self.gateway = PoolGateway(self.store, self.router, self.bridge)
+        # Direct free-provider inference: WorkBuddy is just one resource source.
+        self.direct = DirectSource(settings, self.store)
+        self.router = PoolRouter(self.store, self.catalog, direct=self.direct)
+        self.gateway = PoolGateway(
+            self.store, self.router, self.bridge, direct=self.direct
+        )
         self.reconciler = Reconciler(self.store, self.bridge)
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -54,7 +59,10 @@ class WorkBuddyService:
         return lock
 
     async def aclose(self) -> None:
-        await self.bridge.aclose()
+        try:
+            await self.direct.aclose()
+        finally:
+            await self.bridge.aclose()
 
     async def refresh_catalog(self, *, force: bool = False) -> list[dict]:
         async with self._lock("catalog"):

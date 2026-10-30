@@ -95,7 +95,11 @@ async def list_models(request: Request) -> dict:
             "description": "Lowest current effective multiplier",
         },
     ]
-    for item in service.catalog.list_costs():
+    resources = list(service.catalog.list_costs())
+    direct = getattr(service, "direct", None)
+    if direct is not None:
+        resources.extend(direct.candidates())
+    for item in resources:
         model_id = item["model_id"]
         pool_id = f"{item['provider']}/{model_id}"
         if allowed_set and model_id not in allowed_set and pool_id not in allowed_set:
@@ -105,7 +109,8 @@ async def list_models(request: Request) -> dict:
                 "id": pool_id,
                 "object": "model",
                 "created": 0,
-                "owned_by": "workbuddy-pool",
+                "owned_by": f"llm-agg/{item['provider']}",
+                "source": item.get("source") or "workbuddy",
                 "provider": item["provider"],
                 "context_length": item.get("context_length"),
                 "max_output_tokens": item.get("max_output"),

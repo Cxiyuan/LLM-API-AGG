@@ -39,6 +39,13 @@ class ProviderConfig:
     enabled: bool = True
     notes: str | None = None
     quota_sources: list[QuotaSourceConfig] = field(default_factory=list)
+    # Inference endpoint (OpenAI-compatible chat). Defaults to `base_url`;
+    # providers whose catalog and chat live on different paths override it
+    # (Google Gemini's OpenAI compatibility layer, Cohere compatibility API).
+    chat_base_url: str | None = None
+    chat_auth: str | None = None
+    chat_auth_param: str | None = None
+    chat_enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -161,6 +168,13 @@ def _parse_provider(raw: Any, index: int) -> ProviderConfig:
     if free_kind not in _ALLOWED_FREE_KIND:
         raise ConfigError(f"{where}.free_kind must be one of {sorted(_ALLOWED_FREE_KIND)}")
 
+    chat_base_url = str(item.get("chat_base_url") or "").strip().rstrip("/") or None
+    if chat_base_url is not None and not chat_base_url.startswith(("http://", "https://")):
+        raise ConfigError(f"{where}.chat_base_url must be an http(s) URL")
+    chat_auth = str(item.get("chat_auth") or "").strip().lower() or None
+    if chat_auth is not None and chat_auth not in _ALLOWED_AUTH:
+        raise ConfigError(f"{where}.chat_auth must be one of {sorted(_ALLOWED_AUTH)}")
+
     return ProviderConfig(
         id=provider_id,
         name=str(item.get("name") or provider_id).strip(),
@@ -178,6 +192,10 @@ def _parse_provider(raw: Any, index: int) -> ProviderConfig:
         enabled=bool(item.get("enabled", True)),
         notes=(str(item["notes"]) if item.get("notes") else None),
         quota_sources=_parse_quota_sources(item.get("quota_sources"), provider_id),
+        chat_base_url=chat_base_url,
+        chat_auth=chat_auth,
+        chat_auth_param=(str(item["chat_auth_param"]).strip() if item.get("chat_auth_param") else None),
+        chat_enabled=bool(item.get("chat_enabled", True)),
     )
 
 

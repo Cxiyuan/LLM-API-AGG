@@ -1,4 +1,5 @@
-/* WorkBuddy pool console. No external dependencies, no build step. */
+/* LLM-API-AGG console: unified model resources (free providers + WorkBuddy bridge).
+   No external dependencies, no build step. */
 (() => {
   "use strict";
 
@@ -131,30 +132,50 @@
   // ------------------------------------------------------------------ overview
 
   async function loadOverview() {
-    const data = await api("/api/overview");
+    const [data, stats, resources] = await Promise.all([
+      api("/api/overview"),
+      api("/stats"),
+      api("/api/models"),
+    ]);
     const overview = data.overview || {};
     const bridge = data.bridge || {};
     const snapshot = data.config_snapshot || {};
+    const summary = resources.summary || {};
     const warnings = [];
     if (!bridge.ok) warnings.push("Buddy2api 不可达：" + (bridge.error || "unknown"));
-    if (snapshot.warning) warnings.push("目录警告：" + snapshot.warning);
+    if (snapshot.warning) warnings.push("WorkBuddy 目录警告：" + snapshot.warning);
     if (overview.cooldowns && overview.cooldowns.length) warnings.push("有 " + overview.cooldowns.length + " 个账号处于冷却/额度耗尽状态");
+    if (!summary.callable) warnings.push("当前没有可调用模型：登录 WorkBuddy 账号，或给免费厂商配置 API Key");
     setView(
       el(
         "div",
         {},
         card(
-          "总览",
+          "LLM-API-AGG 总览",
           el(
             "div",
             { class: "grid" },
-            stat("账号", overview.accounts || 0),
+            stat("目录厂商", stats.providers || 0),
+            stat("目录模型", stats.models_present || 0),
+            stat("免费目录模型", stats.models_free_present || 0),
+            stat("可调用模型", summary.callable || 0),
+            stat("模型资源", summary.total || 0),
+            stat("WorkBuddy 账号", overview.accounts || 0),
             stat("可用积分", num(overview.available_credits)),
-            stat("免费模型", overview.free_models || 0),
-            stat("模型总数", overview.models || 0),
             stat("活跃会话", overview.sessions || 0)
           ),
           warnings.length ? el("div", {}, ...warnings.map((item) => el("p", { class: "warn", text: item }))) : el("p", { class: "ok", text: "运行正常" })
+        ),
+        card(
+          "资源来源",
+          el(
+            "div",
+            { class: "grid" },
+            ...(resources.sources || []).map((source) =>
+              stat(source.name + "（" + source.source + "）", source.callable + " / " + source.total + " 可调用")
+            )
+          ),
+          el("p", { class: "muted", text: "会话 ID 与智能负载路由在统一 /v1 网关上全局生效，不区分来源。" })
         ),
         card(
           "Buddy2api",
@@ -162,9 +183,156 @@
           el("p", { class: "muted", text: "内部调试地址：http://127.0.0.1:8787/（仅本机）" })
         ),
         card(
-          "最近目录快照",
+          "最近 WorkBuddy 目录快照",
           el("pre", {}, JSON.stringify(snapshot || {}, null, 2))
         )
+      )
+    );
+  }
+
+  // -------------------------------------------------------------- model resources
+
+  const REASONS = {
+    no_account: "无 WorkBuddy 账号",
+    no_key: "未配置厂商 Key",
+    paid: "付费模型（不代理）",
+    catalog_only: "仅目录（未接入推理）",
+  };
+
+  async function loadResources() {
+    const data = await api("/api/models");
+    const items = data.items || [];
+    const sources = data.sources || [];
+    const summary = data.summary || {};
+    let sourceFilter = "";
+    let callableOnly = false;
+    let query = "";
+
+    const sourceSelect = el(
+      "select",
+      { onchange: (event) => { sourceFilter = event.target.value; render(); } },
+      el("option", { value: "", text: "全部来源" }),
+      ...sources.map((source) => el("option", { value: source.source, text: source.name + "（" + source.callable + "/" + source.total + "）" }))
+    );
+    const search = el("input", {
+      placeholder: "搜索模型 / 厂商",
+      oninput: (event) => { query = event.target.value.trim().toLowerCase(); render(); },
+    });
+    const only = el("input", {
+      type: "checkbox",
+      onchange: (event) => { callableOnly = event.target.checked; render(); },
+    });
+    const body = el("tbody");
+    const tableNode = el("table", {}, el("thead", {}, el("tr", {},
+      ...["来源", "模型", "免费", "上下文", "倍率/价格", "可调用", "说明"].map((name) => el("th", { text: name }))
+    )), body);
+
+    function render() {
+      clear(body);
+      const rows = items.filter((item) => {
+        if (sourceFilter && item.source !== sourceFilter) return false;
+        if (callableOnly && !item.callable) return false;
+        if (query) {
+          const hay = (item.wire_id + " " + (item.name || "") + " " + (item.provider_name || "")).toLowerCase();
+          if (!hay.includes(query)) return false;
+        }
+        return true;
+      });
+      for (const item of rows) {
+        const cost = item.kind === "workbuddy"
+          ? (item.free ? "免费（0）" : num(item.credits))
+          : (item.free ? "0" : "付费");
+        body.append(el("tr", {},
+          el("td", {}, badge(item.source, item.kind === "workbuddy" ? "free" : "")),
+          el("td", {},
+            el("strong", { text: item.wire_id }),
+            el("div", { class: "muted", text: (item.name || "") + " · " + (item.provider_name || item.provider) })),
+          el("td", {}, item.free ? badge("免费", "free") : badge("付费", "paid")),
+          el("td", { text: fmt(item.context_length) }),
+          el("td", { text: cost }),
+          el("td", {}, item.callable ? badge("可调用", "ok") : badge("不可用", "bad")),
+          el("td", { text: item.callable ? "—" : (REASONS[item.reason] || item.reason || "—") })
+        ));
+      }
+      if (!rows.length) {
+        body.append(el("tr", {}, el("td", { colspan: "7", class: "empty", text: "没有符合条件的模型" })));
+      }
+    }
+
+    setView(
+      el("div", {},
+        card("模型资源（全局）",
+          el("div", { class: "grid" },
+            stat("资源总数", summary.total || 0),
+            stat("可调用", summary.callable || 0),
+            stat("免费", summary.free || 0),
+            stat("来源", summary.sources || 0)),
+          el("div", { class: "toolbar" }, sourceSelect, search,
+            el("label", { class: "chip" }, only, " 只看可调用"),
+            el("button", { text: "刷新", onclick: () => loadResources().catch((error) => setView(card("加载失败", errorBox(error)))) })),
+          el("p", { class: "muted", text: "WorkBuddy 是其中一个来源；免费厂商模型只要配置了 Key 且属于免费目录，就直接由统一 /v1 调用。会话亲和与负载路由对所有可调用资源生效。" }),
+          tableNode)),
+        card("接入说明",
+          el("p", { class: "muted", text: "WorkBuddy：控制台登录账号后，模型自动上架。" }),
+          el("p", { class: "muted", text: "免费厂商：在部署环境配置 OPENROUTER_API_KEY / GROQ_API_KEY / CEREBRAS_API_KEY / GEMINI_API_KEY / MISTRAL_API_KEY / COHERE_API_KEY / SAMBANOVA_API_KEY / NVIDIA_API_KEY / ZAI_API_KEY，重启容器后对应免费模型变为可调用。" }),
+          el("p", { class: "muted", text: "付费模型不会被代理，避免 auto 路由产生费用。" }))
+    );
+    render();
+  }
+
+  // ----------------------------------------------------------------- free catalog
+
+  async function loadCatalog() {
+    const [stats, providers, free, changes, quota] = await Promise.all([
+      api("/stats"),
+      api("/providers"),
+      api("/api/catalog/free"),
+      api("/changes?since=24h"),
+      api("/quota/sources"),
+    ]);
+    const providerRows = (providers.items || []).map((item) => [
+      el("div", {}, el("strong", { text: item.name }), el("div", { class: "muted", text: item.id + " · " + item.adapter })),
+      el("span", { class: item.enabled ? "ok" : "bad", text: item.enabled ? "启用" : "停用" }),
+      el("code", { text: item.key_env || "—" }),
+      el("span", { class: item.last_status === "ok" ? "ok" : "warn", text: item.last_status || "—" }),
+      fmt(item.model_count),
+      fmt(item.free_model_count),
+      el("span", { class: "muted", text: (item.last_error || "").slice(0, 120) }),
+    ]);
+    const freeRows = (free.items || []).map((item) => [
+      el("div", {}, el("strong", { text: item.wire_id }), el("div", { class: "muted", text: item.name })),
+      fmt(item.provider_name),
+      fmt(item.context_length),
+      fmt(item.free_kind),
+      item.callable ? badge("可调用", "ok") : badge("仅目录", ""),
+    ]);
+    const quotaRows = (quota.items || []).map((item) => [
+      fmt(item.provider_id),
+      fmt(item.label),
+      fmt(item.last_checked_at),
+      fmt(item.last_changed_at),
+      item.url ? el("a", { href: item.url, target: "_blank", rel: "noopener", text: "文档" }) : "—",
+    ]);
+    const changeRows = (changes.items || []).map((item) => [
+      fmt(item.ts),
+      fmt(item.kind),
+      fmt(item.provider_id),
+      fmt(item.summary),
+    ]);
+    setView(
+      el("div", {},
+        card("免费目录（free-llm-api 层）",
+          el("div", { class: "grid" },
+            stat("厂商", stats.providers || 0),
+            stat("在线模型", stats.models_present || 0),
+            stat("免费模型", stats.models_free_present || 0),
+            stat("额度来源", stats.quota_sources || 0),
+            stat("变更事件", stats.events || 0)),
+          el("p", { class: "muted", text: "近实时抓取各厂商目录与额度文档；这里只用于发现和上架，免费厂商的推理由统一 /v1 直接调用。" })),
+        card("厂商", table(["厂商", "状态", "Key 环境变量", "最近轮询", "模型", "免费模型", "错误"], providerRows)),
+        card("免费文本模型", table(["模型", "厂商", "上下文", "免费类型", "调用"], freeRows)),
+        card("额度来源", table(["厂商", "来源", "最近检查", "最近变更", "文档"], quotaRows)),
+        card("最近变更（24h）", table(["时间", "类型", "厂商", "摘要"], changeRows))
       )
     );
   }
@@ -645,6 +813,8 @@
 
   const loaders = {
     overview: loadOverview,
+    resources: loadResources,
+    catalog: loadCatalog,
     accounts: loadAccounts,
     models: loadModels,
     checkin: loadCheckin,

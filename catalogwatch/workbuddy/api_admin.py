@@ -21,6 +21,8 @@ from .auth import (
     set_session_cookies,
     token_matches,
 )
+from .direct import BRIDGE_PROVIDERS
+from .model_filter import is_text_chat_model
 from .router import DEFAULT_POLICY
 from .service import WorkBuddyService
 
@@ -123,6 +125,162 @@ async def overview(request: Request) -> dict:
 
 
 # -------------------------------------------------------------------- models
+
+def _provider_name(service: WorkBuddyService, provider_id: str) -> str:
+    for cfg in service.settings.providers:
+        if cfg.id == provider_id:
+            return cfg.name
+    return provider_id
+
+
+# ------------------------------------------------------------- unified resources
+
+@router.get("/models")
+async def unified_models(request: Request) -> dict:
+    """Every model resource the platform knows about, across all sources.
+
+    `callable` answers whether the unified `/v1` gateway can serve the model
+    right now: WorkBuddy needs a logged-in account, direct providers need an
+    API key and a free catalog entry. Catalog-only rows stay visible with a
+    reason instead of disappearing, so operators can see what is available
+    versus what is wired.
+    """
+    service, _actor = _admin(request)
+    accounts = bool(service.store.list_accounts(present=True))
+    direct = getattr(service, "direct", None)
+    items: list[dict[str, Any]] = []
+
+    for cost in service.catalog.list_costs():
+        provider = str(cost.get("provider") or "")
+        items.append(
+            {
+                "source": "workbuddy",
+                "kind": "workbuddy",
+                "provider": provider,
+                "provider_name": "WorkBuddy" if provider == "workbuddy" else "WorkBuddy 国际版",
+                "model_id": cost.get("model_id"),
+                "wire_id": f"{provider}/{cost.get('model_id')}",
+                "name": cost.get("name") or cost.get("model_id"),
+                "free": bool(cost.get("free")),
+                "callable": accounts,
+                "reason": None if accounts else "no_account",
+                "context_length": cost.get("context_length"),
+                "max_output": cost.get("max_output"),
+                "credits": cost.get("credits"),
+                "base_credits": cost.get("base_credits"),
+                "cost_source": cost.get("cost_source"),
+                "pricing": None,
+            }
+        )
+
+    for row in service.store.list_catalog_models(present=True):
+        provider = str(row.get("provider_id") or "")
+        if provider in BRIDGE_PROVIDERS:
+            continue
+        model_id = str(row.get("model_id") or "")
+        name = row.get("name")
+        if not is_text_chat_model(model_id, name):
+            continue
+        is_direct = bool(direct is not None and direct.known(provider))
+        ready = bool(is_direct and direct is not None and direct.provider_ready(provider))
+        free = bool(row.get("is_free"))
+        if not is_direct:
+            reason = "catalog_only"
+        elif not free:
+            reason = "paid"
+        elif not ready:
+            reason = "no_key"
+        else:
+            reason = None
+        items.append(
+            {
+                "source": provider,
+                "kind": "direct",
+                "provider": provider,
+                "provider_name": _provider_name(service, provider),
+                "model_id": model_id,
+                "wire_id": f"{provider}/{model_id}",
+                "name": name or model_id,
+                "free": free,
+                "callable": reason is None,
+                "reason": reason,
+                "context_length": row.get("context_length"),
+                "max_output": row.get("max_output"),
+                "credits": 0.0 if free else None,
+                "base_credits": None,
+                "cost_source": "free" if free else "paid",
+                "pricing": row.get("pricing"),
+            }
+        )
+
+    items.sort(
+        key=lambda item: (
+            0 if item.get("callable") else 1,
+            0 if item.get("free") else 1,
+            str(item.get("source")),
+            str(item.get("model_id")),
+        )
+    )
+    sources: dict[str, dict[str, Any]] = {}
+    for item in items:
+        bucket = sources.setdefault(
+            str(item["source"]),
+            {"source": str(item["source"]), "name": item.get("provider_name"), "total": 0, "free": 0, "callable": 0},
+        )
+        bucket["total"] += 1
+        bucket["free"] += 1 if item.get("free") else 0
+        bucket["callable"] += 1 if item.get("callable") else 0
+    return {
+        "items": items,
+        "summary": {
+            "total": len(items),
+            "free": sum(1 for item in items if item.get("free")),
+            "callable": sum(1 for item in items if item.get("callable")),
+            "sources": len(sources),
+        },
+        "sources": sorted(sources.values(), key=lambda item: item["source"]),
+        "updated_at": utcnow_iso(),
+    }
+
+
+@router.get("/catalog/free")
+async def catalog_free(request: Request, q: str = "") -> dict:
+    """Text-only free models from the provider directory (no bridges)."""
+    service, _actor = _admin(request)
+    direct = getattr(service, "direct", None)
+    needle = q.strip().lower()
+    items: list[dict[str, Any]] = []
+    for row in service.store.list_catalog_models(present=True, free=True):
+        provider = str(row.get("provider_id") or "")
+        if provider in BRIDGE_PROVIDERS:
+            continue
+        model_id = str(row.get("model_id") or "")
+        name = row.get("name")
+        if not is_text_chat_model(model_id, name):
+            continue
+        haystack = f"{provider} {model_id} {name or ''}".lower()
+        if needle and needle not in haystack:
+            continue
+        callable_here = bool(
+            direct is not None and direct.known(provider) and direct.provider_ready(provider)
+        )
+        items.append(
+            {
+                "provider": provider,
+                "provider_name": _provider_name(service, provider),
+                "model_id": model_id,
+                "name": name or model_id,
+                "wire_id": f"{provider}/{model_id}",
+                "context_length": row.get("context_length"),
+                "max_output": row.get("max_output"),
+                "free_kind": row.get("free_kind"),
+                "pricing": row.get("pricing"),
+                "callable": callable_here,
+            }
+        )
+    items.sort(key=lambda item: (item["provider"], item["model_id"]))
+    return {"items": items, "count": len(items), "updated_at": utcnow_iso()}
+
 
 @router.get("/workbuddy/models")
 async def models(request: Request) -> dict:

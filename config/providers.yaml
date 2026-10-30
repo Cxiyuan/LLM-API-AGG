@@ -70,6 +70,9 @@ providers:
     key_env: GEMINI_API_KEY
     auth: query
     auth_param: key
+    # Gemini 的 OpenAI 兼容推理层与目录接口不同路径，且用 Bearer 鉴权。
+    chat_base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    chat_auth: bearer
     free_kind: free_tier
     poll_interval_minutes: 30
     quota_sources:
@@ -90,6 +93,8 @@ providers:
     adapter: openai_models
     base_url: https://api.cohere.com/v1
     key_env: COHERE_API_KEY
+    # Cohere 的 OpenAI 兼容推理层在 /compatibility/v1。
+    chat_base_url: https://api.cohere.com/compatibility/v1
     free_kind: free_tier
     poll_interval_minutes: 45
     quota_sources:
@@ -144,5 +149,7 @@ providers:
     key_required: true
     free_kind: free_tier
     poll_interval_minutes: 30
+    # 推理走池网关的 bridge 通道（账号/积分/会话绑定），不当作直连厂商。
+    chat_enabled: false
     enabled: false
     notes: "Unofficial local bridge; browser login; consumes your own account quota."

@@ -17,6 +17,7 @@ import httpx
 
 from ..util import utcnow_iso
 from .bridge import BridgeError, BuddyBridge
+from .direct import DirectError, DirectSource
 from .router import ALIASES, Attempt, PoolError, PoolIntent, PoolRouter, extract_intent
 from .store import WorkBuddyStore
 
@@ -34,7 +35,8 @@ def error_body(code: str, message: str) -> dict:
 
 
 def _retryable(status: int) -> bool:
-    return status in {401, 403, 408, 409, 425, 429, 500, 502, 503, 504}
+    # 0 = direct-provider transport failure (no HTTP status reached us).
+    return status in {0, 401, 403, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
 def _classify(status: int) -> str:
@@ -108,7 +110,8 @@ def _usage(body: Any) -> dict:
 def _routing(attempts: list[Attempt]) -> list[dict]:
     return [
         {
-            "account_id": item.account.get("account_id"),
+            "source": item.source,
+            "account_id": item.account.get("account_id") if item.account else None,
             "provider": item.provider,
             "model_id": item.model_id,
             "free": item.free,
@@ -124,10 +127,12 @@ class PoolGateway:
         store: WorkBuddyStore,
         router: PoolRouter,
         bridge: BuddyBridge,
+        direct: DirectSource | None = None,
     ):
         self.store = store
         self.router = router
         self.bridge = bridge
+        self.direct = direct
 
     # --------------------------------------------------------------- bookkeeping
 
@@ -176,6 +181,9 @@ class PoolGateway:
 
     @staticmethod
     def _attempt_headers(attempt: Attempt, request_id: str, attempt_no: int) -> dict[str, str]:
+        if attempt.source == "direct" or attempt.account is None:
+            # Direct providers authenticate with their own key; no bridge hints.
+            return {}
         return {
             "X-WorkBuddy-Account": str(attempt.account.get("account_id")),
             "X-WorkBuddy-Account-Mode": "strict",
@@ -185,11 +193,13 @@ class PoolGateway:
     @staticmethod
     def _response_headers(attempt: Attempt, request_id: str, attempt_no: int, cost_source: str) -> dict[str, str]:
         credits = attempt.effective_credits
+        account_id = attempt.account.get("account_id") if attempt.account else ""
         return {
             "X-Pool-Request-Id": request_id,
             "X-Pool-Model": attempt.model_id,
             "X-Pool-Provider": attempt.provider,
-            "X-Pool-Account": str(attempt.account.get("account_id")),
+            "X-Pool-Source": attempt.source,
+            "X-Pool-Account": "" if account_id is None else str(account_id),
             "X-Pool-Effective-Credits": "" if credits is None else str(credits),
             "X-Pool-Free": "1" if attempt.free else "0",
             "X-Pool-Cost-Source": cost_source,
@@ -209,7 +219,9 @@ class PoolGateway:
         session_id: str | None = None,
         bind_session: bool = False,
     ) -> None:
-        account_id = int(attempt.account["account_id"])
+        account_id = (
+            int(attempt.account["account_id"]) if attempt.account is not None else None
+        )
         self.router.load.exit(attempt.provider, attempt.model_id, account_id)
         self.router.load.record(
             attempt.provider,
@@ -223,11 +235,14 @@ class PoolGateway:
         completion = int(usage.get("completion_tokens") or 0)
         total = int(usage.get("total_tokens") or (prompt + completion))
         credit = usage.get("credit")
+        if attempt.source == "direct":
+            # Direct sources only proxy free models: the cost is known zero.
+            credit = 0.0
         credit_value = float(credit) if credit is not None else 0.0
         self.store.record_attempt(
             request_id=request_id,
             attempt_no=attempt_no,
-            account_id=int(attempt.account["account_id"]),
+            account_id=account_id,
             model_id=attempt.model_id,
             provider=attempt.provider,
             status_code=status_code,
@@ -240,14 +255,18 @@ class PoolGateway:
             request_id,
             model_routed=attempt.model_id,
             provider=attempt.provider,
-            bridge_account_id=int(attempt.account["account_id"]),
+            bridge_account_id=account_id,
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=total,
             credits=credit,
             credits_estimated=0,
             effective_credits=attempt.effective_credits,
-            cost_source="upstream" if credit is not None else "pending",
+            cost_source=(
+                "free"
+                if attempt.source == "direct"
+                else ("upstream" if credit is not None else "pending")
+            ),
             status_code=status_code,
             finish_reason=usage.get("finish_reason"),
             attempts=attempt_no,
@@ -258,13 +277,14 @@ class PoolGateway:
             self.store.add_key_usage(
                 int(key["id"]), utcnow_iso()[:10], tokens=total, credits=credit_value
             )
-        self.store.increment_daily(
-            int(attempt.account["account_id"]),
-            free=attempt.free,
-            tokens=total,
-            credits=credit_value,
-        )
-        self.store.note_success(int(attempt.account["account_id"]))
+        if account_id is not None:
+            self.store.increment_daily(
+                account_id,
+                free=attempt.free,
+                tokens=total,
+                credits=credit_value,
+            )
+            self.store.note_success(account_id)
         if session_id and bind_session:
             try:
                 ttl = int(self.router.policy().get("session_ttl_seconds") or 1800)
@@ -289,7 +309,9 @@ class PoolGateway:
         message: str,
         latency_ms: int,
     ) -> None:
-        account_id = int(attempt.account["account_id"])
+        account_id = (
+            int(attempt.account["account_id"]) if attempt.account is not None else None
+        )
         self.router.load.exit(attempt.provider, attempt.model_id, account_id)
         self.router.load.record(
             attempt.provider,
@@ -311,6 +333,12 @@ class PoolGateway:
             duration_ms=latency_ms,
             credits=None,
         )
+        if attempt.source == "direct":
+            if self.direct is not None:
+                self.direct.mark_cooldown(attempt.provider, attempt.model_id, status_code)
+            return
+        if account_id is None:
+            return
         if status_code == 429:
             state = self.store.get_state(account_id)
             count = int(state.get("free_429_count") or 0) + 1
@@ -341,32 +369,40 @@ class PoolGateway:
         session_id: str | None = None,
     ) -> tuple[int, dict, dict[str, str]]:
         intent = extract_intent(payload)
-        attempts = self.router.plan(intent, key, session_id=session_id)
+        attempts = self.router.plan(
+            intent, key, session_id=session_id, allow_direct=endpoint != "responses"
+        )
         self._reserve(key)
         request_id = "wb-" + secrets.token_hex(12)
         self._start(
             request_id, key, endpoint, intent, attempts, session_id=session_id
         )
         bind_session = bool(session_id and intent.model in ALIASES)
-        last_error: BridgeError | None = None
+        last_error: Exception | None = None
 
         for attempt_no, attempt in enumerate(attempts, start=1):
             body = dict(payload)
-            body["model"] = attempt.wire_id
+            body["model"] = (
+                attempt.model_id if attempt.source == "direct" else attempt.wire_id
+            )
             headers = self._attempt_headers(attempt, request_id, attempt_no)
             self.router.load.enter(
                 attempt.provider,
                 attempt.model_id,
-                int(attempt.account["account_id"]),
+                int(attempt.account["account_id"]) if attempt.account else None,
             )
             started = time.monotonic()
             try:
-                if endpoint == "responses":
+                if attempt.source == "direct":
+                    if self.direct is None:
+                        raise DirectError(503, "direct inference is not configured")
+                    response = await self.direct.post_chat(attempt.provider, body)
+                elif endpoint == "responses":
                     response = await self.bridge.post_responses_with_headers(body, headers)
                 else:
                     response = await self.bridge.post_chat_with_headers(body, headers)
                 result = response.json()
-            except BridgeError as exc:
+            except (BridgeError, DirectError) as exc:
                 last_error = exc
                 latency = int((time.monotonic() - started) * 1000)
                 self._failure(
@@ -442,30 +478,38 @@ class PoolGateway:
         session_id: str | None = None,
     ) -> tuple[httpx.Response, Attempt, str, int, dict[str, str], int, dict]:
         intent = extract_intent(payload)
-        attempts = self.router.plan(intent, key, session_id=session_id)
+        attempts = self.router.plan(
+            intent, key, session_id=session_id, allow_direct=endpoint != "responses"
+        )
         self._reserve(key)
         request_id = "wb-" + secrets.token_hex(12)
         self._start(
             request_id, key, endpoint, intent, attempts, session_id=session_id
         )
-        last_error: BridgeError | None = None
+        last_error: Exception | None = None
 
         for attempt_no, attempt in enumerate(attempts, start=1):
             body = dict(payload)
-            body["model"] = attempt.wire_id
+            body["model"] = (
+                attempt.model_id if attempt.source == "direct" else attempt.wire_id
+            )
             headers = self._attempt_headers(attempt, request_id, attempt_no)
             self.router.load.enter(
                 attempt.provider,
                 attempt.model_id,
-                int(attempt.account["account_id"]),
+                int(attempt.account["account_id"]) if attempt.account else None,
             )
             started = time.monotonic()
             try:
-                if endpoint == "responses":
+                if attempt.source == "direct":
+                    if self.direct is None:
+                        raise DirectError(503, "direct inference is not configured")
+                    response = await self.direct.open_chat(attempt.provider, body)
+                elif endpoint == "responses":
                     response = await self.bridge.open_responses_stream(body, headers)
                 else:
                     response = await self.bridge.open_chat_stream(body, headers)
-            except BridgeError as exc:
+            except (BridgeError, DirectError) as exc:
                 last_error = exc
                 latency = int((time.monotonic() - started) * 1000)
                 self._failure(

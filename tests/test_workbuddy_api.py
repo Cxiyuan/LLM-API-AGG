@@ -33,7 +33,7 @@ def test_console_auth_and_empty_accounts(tmp_path, monkeypatch):
 
     with TestClient(create_app(_settings(tmp_path))) as client:
         assert client.get("/").status_code == 200
-        assert "WorkBuddy Pool" in client.get("/").text
+        assert "LLM-API-AGG" in client.get("/").text
 
         unauthorized = client.get("/api/overview")
         assert unauthorized.status_code == 401

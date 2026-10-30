@@ -10,6 +10,7 @@ from typing import Any
 
 from ..util import utcnow_iso
 from .catalog import WorkBuddyCatalog
+from .direct import BRIDGE_PROVIDERS, DirectSource
 from .load import LoadTracker
 from .model_filter import is_text_chat_model
 from .store import WorkBuddyStore
@@ -64,10 +65,12 @@ class Attempt:
     model_id: str
     wire_id: str
     cost: dict
-    account: dict
+    # None for direct (key-authenticated) providers; a bridge account otherwise.
+    account: dict | None
     account_state: dict
     free: bool
     effective_credits: float | None
+    source: str = "workbuddy"  # workbuddy | direct
 
 
 def _future(value: Any) -> bool:
@@ -145,10 +148,37 @@ class PoolRouter:
         store: WorkBuddyStore,
         catalog: WorkBuddyCatalog,
         load: LoadTracker | None = None,
+        direct: DirectSource | None = None,
     ):
         self.store = store
         self.catalog = catalog
         self.load = load or LoadTracker()
+        self.direct = direct
+
+    def _is_direct(self, provider: str) -> bool:
+        return (
+            self.direct is not None
+            and provider not in BRIDGE_PROVIDERS
+            and self.direct.known(provider)
+        )
+
+    @staticmethod
+    def _wire_id(cost: dict) -> str:
+        return f"{cost.get('provider')}/{cost.get('model_id')}"
+
+    def _candidates(self, *, allow_direct: bool = True) -> list[dict]:
+        """Every callable model resource: WorkBuddy plus free direct providers."""
+        costs: list[dict] = []
+        if self.store.list_accounts(present=True):
+            for item in self.catalog.list_costs():
+                if not item.get("present", True):
+                    continue
+                item = dict(item)
+                item["source"] = "workbuddy"
+                costs.append(item)
+        if allow_direct and self.direct is not None:
+            costs.extend(self.direct.candidates())
+        return costs
 
     def policy(self) -> dict:
         value = self.store.get_setting("policy", {})
@@ -189,12 +219,14 @@ class PoolRouter:
         requested = intent.model
         provider = None
         model_id = requested
-        if requested.startswith("workbuddy-i/"):
-            provider = "workbuddy-i"
-            model_id = requested[len("workbuddy-i/") :]
-        elif requested.startswith("workbuddy/"):
-            provider = "workbuddy"
-            model_id = requested[len("workbuddy/") :]
+        # Wire ids are `<source>/<model id>`; model ids may themselves contain
+        # slashes (OpenRouter), so only the first segment names the source.
+        if "/" in requested:
+            head, rest = requested.split("/", 1)
+            if head in BRIDGE_PROVIDERS or (
+                self.direct is not None and self.direct.known(head)
+            ):
+                provider, model_id = head, rest
 
         # 显式点名伪模型/视频/音频/图像模型时直接拒绝：池不代理非文本能力，
         # 交给上游也只会得到一个难懂的协议错误。
@@ -214,8 +246,29 @@ class PoolRouter:
         if matches:
             return matches
 
-        # Explicit models may be newer than our catalog. Preserve the request
-        # and let the bridge return its own error if the model is invalid.
+        if provider is not None and self._is_direct(provider):
+            # Direct sources only proxy free models; a paid model must fail
+            # loudly instead of quietly spending the user's balance.
+            if self.direct is not None and self.direct.is_paid(provider, model_id):
+                raise PoolError(
+                    "model_not_free",
+                    f"Model '{requested}' is not a free model; this platform only proxies free models",
+                    403,
+                )
+            if self.direct is not None and not self.direct.provider_ready(provider):
+                raise PoolError(
+                    "provider_no_key",
+                    f"Provider '{provider}' has no API key configured",
+                    503,
+                )
+            raise PoolError(
+                "model_unavailable",
+                f"Provider '{provider}' has no callable free model '{model_id}'",
+                404,
+            )
+
+        # Explicit WorkBuddy models may be newer than our catalog. Preserve the
+        # request and let the bridge return its own error if the model is invalid.
         providers = [provider] if provider else ["workbuddy", "workbuddy-i"]
         return [
             {
@@ -230,6 +283,7 @@ class PoolRouter:
                 "promotion_active": False,
                 "promotion_factor": None,
                 "cost_source": "unknown",
+                "source": "workbuddy",
             }
             for item in providers
         ]
@@ -241,16 +295,17 @@ class PoolRouter:
         policy: dict,
         *,
         session_id: str | None = None,
+        allow_direct: bool = True,
     ) -> list[dict]:
-        if not self.store.list_accounts(present=True):
-            raise PoolError(
-                "no_accounts",
-                "No WorkBuddy account is logged in to the pool",
-                503,
-            )
-        costs = [item for item in self.catalog.list_costs() if item.get("present", True)]
+        costs = self._candidates(allow_direct=allow_direct)
         if not costs:
-            raise PoolError("no_models", "No WorkBuddy models are available yet", 503)
+            if not self.store.list_accounts(present=True):
+                raise PoolError(
+                    "no_accounts",
+                    "No WorkBuddy account is logged in and no free provider has an API key",
+                    503,
+                )
+            raise PoolError("no_models", "No callable model is available yet", 503)
 
         explicit = intent.model not in ALIASES
         if explicit:
@@ -275,7 +330,7 @@ class PoolRouter:
 
         filtered = []
         for item in costs:
-            wire_id = f"{item['provider']}/{item['model_id']}"
+            wire_id = self._wire_id(item)
             if not self._model_allowed(item["model_id"], wire_id, key, policy):
                 continue
             if not self._capable(item, intent):
@@ -510,7 +565,10 @@ class PoolRouter:
         model_id = str(binding.get("model_id") or "")
         if not provider or not model_id:
             return None
-        cost = self.catalog.effective_cost(provider, model_id)
+        if self._is_direct(provider):
+            cost = self.direct.cost_of(provider, model_id) if self.direct else None
+        else:
+            cost = self.catalog.effective_cost(provider, model_id)
         if cost is None or not cost.get("present", True):
             return None
         if not self._capable(cost, intent):
@@ -531,7 +589,12 @@ class PoolRouter:
         return cost
 
     def plan(
-        self, intent: PoolIntent, key: dict, *, session_id: str | None = None
+        self,
+        intent: PoolIntent,
+        key: dict,
+        *,
+        session_id: str | None = None,
+        allow_direct: bool = True,
     ) -> list[Attempt]:
         policy = self.policy()
         if key.get("max_attempts"):
@@ -542,11 +605,17 @@ class PoolRouter:
             binding = self.store.get_session(session_id)
 
         models = self._rank_models(
-            intent, key, policy, session_id=session_id
+            intent, key, policy, session_id=session_id, allow_direct=allow_direct
         )
         preferred_account_id: int | None = None
         if binding:
             bound = self._bound_cost(binding, intent, key, policy)
+            # /v1/responses cannot be served by direct chat providers; a session
+            # bound to one must be re-planned on a bridge model.
+            if bound is not None and not allow_direct and self._is_direct(
+                str(bound.get("provider") or "")
+            ):
+                bound = None
             if bound is not None:
                 models = [
                     bound,
@@ -577,7 +646,32 @@ class PoolRouter:
         for cost in models:
             provider = str(cost.get("provider"))
             model_id = str(cost.get("model_id"))
-            wire_id = f"{provider}/{model_id}"
+            wire_id = self._wire_id(cost)
+            source = str(
+                cost.get("source")
+                or ("direct" if self._is_direct(provider) else "workbuddy")
+            )
+            if source == "direct":
+                if self.direct is None or not self.direct.provider_ready(provider):
+                    continue
+                if self.direct.cooling(provider, model_id):
+                    continue
+                attempts.append(
+                    Attempt(
+                        provider=provider,
+                        model_id=model_id,
+                        wire_id=wire_id,
+                        cost=cost,
+                        account=None,
+                        account_state={},
+                        free=bool(cost.get("free")),
+                        effective_credits=cost.get("credits"),
+                        source="direct",
+                    )
+                )
+                if len(attempts) >= max_attempts:
+                    break
+                continue
             accounts = self._accounts_for(
                 provider,
                 cost,
@@ -601,6 +695,7 @@ class PoolRouter:
                         account_state=state,
                         free=bool(cost.get("free")),
                         effective_credits=cost.get("credits"),
+                        source="workbuddy",
                     )
                 )
                 if len(attempts) >= max_attempts:
@@ -611,7 +706,8 @@ class PoolRouter:
         if not attempts:
             raise PoolError(
                 "no_accounts",
-                "No WorkBuddy account can serve this request (login, credits, cooldown, or caps)",
+                "No source can serve this request: WorkBuddy accounts (login/credits/cooldown/caps)"
+                " and free providers (API keys/cooldown) are all unavailable",
                 503,
             )
 
@@ -625,7 +721,9 @@ class PoolRouter:
                 session_id,
                 provider=first.provider,
                 model_id=first.model_id,
-                account_id=int(first.account["account_id"]),
+                account_id=(
+                    int(first.account["account_id"]) if first.account is not None else None
+                ),
                 ttl_seconds=ttl,
             )
         return attempts
