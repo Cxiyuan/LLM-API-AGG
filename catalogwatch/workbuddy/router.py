@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..util import utcnow_iso
@@ -156,6 +157,23 @@ class PoolRouter:
         self.catalog = catalog
         self.load = load or LoadTracker()
         self.direct = direct
+        self._proven_at = 0.0
+        self._proven: dict[tuple[str, str], int] = {}
+
+    def _proven_models(self) -> dict[tuple[str, str], int]:
+        """Recent success counts, cached briefly; the ledger survives restarts."""
+        now = time.monotonic()
+        if now - self._proven_at < 30.0:
+            return self._proven
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(
+            timespec="seconds"
+        )
+        try:
+            self._proven = self.store.model_success_counts(since)
+        except Exception:  # noqa: BLE001 - routing must survive a ledger hiccup
+            self._proven = {}
+        self._proven_at = now
+        return self._proven
 
     def _is_direct(self, provider: str) -> bool:
         return (
@@ -392,11 +410,23 @@ class PoolRouter:
             stability_weight = max(stability_weight, 0.6)
             cost_weight = 0.0
 
+        proven = self._proven_models()
+
         def key_for(item: dict):
             credits = item.get("credits")
             effective = float(credits) if credits is not None else math.inf
             free_now = bool(item.get("free") and prefer_free)
             tier = 0 if free_now else (1 if credits is not None else 2)
+            # Within a cost tier, prefer models that have actually answered
+            # recently; provider catalogs list entries the account cannot use.
+            proven_rank = (
+                0
+                if proven.get(
+                    (str(item.get("provider")), str(item.get("model_id"))), 0
+                )
+                > 0
+                else 1
+            )
             night_rank = (
                 0
                 if (
@@ -421,6 +451,7 @@ class PoolRouter:
             if routing_mode == "cost":
                 return (
                     tier,
+                    proven_rank,
                     effective,
                     night_rank,
                     -quality,
@@ -445,6 +476,7 @@ class PoolRouter:
             )
             return (
                 tier,
+                proven_rank,
                 -score,
                 night_rank,
                 -quality,

@@ -434,6 +434,28 @@ class WorkBuddyStore:
             result.append(item)
         return result
 
+    def model_success_counts(self, since: str) -> dict[tuple[str, str], int]:
+        """Successful attempts per (provider, model) since an ISO timestamp.
+
+        The ledger outlives the process, so routing can prefer models that
+        actually worked instead of re-discovering a provider's unusable
+        catalog entries after every restart.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT provider, model_id,
+                   SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) AS ok
+              FROM pool_request_attempts
+             WHERE started_at >= ? AND provider IS NOT NULL AND model_id IS NOT NULL
+             GROUP BY provider, model_id
+            """,
+            (since,),
+        ).fetchall()
+        return {
+            (str(row["provider"]), str(row["model_id"])): int(row["ok"] or 0)
+            for row in rows
+        }
+
     def list_catalog_models(
         self, *, present: bool = True, free: bool | None = None
     ) -> list[dict]:

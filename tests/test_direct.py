@@ -244,6 +244,25 @@ def test_router_rejects_paid_and_non_text_explicit_models(tmp_path):
     assert non_text.value.code == "model_not_text"
 
 
+def test_router_prefers_models_with_recent_successes(tmp_path):
+    settings = _settings(tmp_path)
+    db = Database(tmp_path / "direct.db")
+    store = WorkBuddyStore(db)
+    _catalog_row(db, "groq", "aaa-model")
+    _catalog_row(db, "groq", "zzz-model")
+    now = "2026-10-30T00:00:00+00:00"
+    store.conn.execute(
+        "INSERT INTO pool_request_attempts (request_id, attempt_no, account_id, model_id,"
+        " provider, status_code, error_code, started_at, duration_ms, credits)"
+        " VALUES ('r-proven', 1, NULL, 'zzz-model', 'groq', 200, NULL, ?, 10, 0)",
+        (now,),
+    )
+    store.conn.commit()
+    router = PoolRouter(store, WorkBuddyCatalog(store, None), direct=DirectSource(settings, store))
+    attempts = router.plan(extract_intent({"model": "auto", "messages": []}), {})
+    assert attempts[0].model_id == "zzz-model"
+
+
 def test_router_no_sources_reports_no_accounts(tmp_path):
     settings = _settings(tmp_path)
     store = _store(tmp_path)
