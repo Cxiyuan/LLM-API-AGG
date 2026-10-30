@@ -118,8 +118,8 @@ jobs:
           curl -fsS -H "Authorization: Bearer $KEY" \
             http://127.0.0.1:18787/v1/models
 
-          # Console (first phase): static UI + admin session/token auth.
-          curl -fsS http://127.0.0.1:18788/ | grep -q "WorkBuddy Pool"
+          # Console: LLM-API-AGG branding + admin session/token auth.
+          curl -fsS http://127.0.0.1:18788/ | grep -q "LLM-API-AGG"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18788/api/overview)" = "401"
           ADMIN="$(docker exec free-llm-smoke cat /data/secrets/catalogwatch_admin_token)"
           test -n "$ADMIN"
@@ -127,6 +127,11 @@ jobs:
             http://127.0.0.1:18788/api/overview
           curl -fsS -H "Authorization: Bearer $ADMIN" \
             http://127.0.0.1:18788/api/workbuddy/accounts
+          # Unified model inventory + free catalog (WorkBuddy is one source).
+          curl -fsS -H "Authorization: Bearer $ADMIN" \
+            http://127.0.0.1:18788/api/models | grep -q '"summary"'
+          curl -fsS -H "Authorization: Bearer $ADMIN" \
+            http://127.0.0.1:18788/api/catalog/free | grep -q '"items"'
 
           # Pool data plane: create a key, list models, and verify a clean
           # no-account 503 (no crash) before any WorkBuddy login.
