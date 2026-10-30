@@ -149,12 +149,21 @@ async def test_post_and_stream_chat_use_openai_wire(tmp_path):
     source = DirectSource(settings, store, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     try:
         response = await source.post_chat(
-            "groq", {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "hi"}]}
+            "groq",
+            {
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": "hi"}],
+                # Pool-only metadata must not leak to the provider.
+                "session_id": "s1",
+                "metadata": {"session_id": "s1"},
+            },
         )
         assert response.json()["choices"][0]["message"]["content"] == "hello"
         assert seen[0].url == "https://api.groq.com/openai/v1/chat/completions"
         assert seen[0].headers["authorization"] == "Bearer gsk-test"
-        assert json.loads(seen[0].content)["model"] == "llama-3.3-70b-versatile"
+        forwarded = json.loads(seen[0].content)
+        assert forwarded["model"] == "llama-3.3-70b-versatile"
+        assert "session_id" not in forwarded and "metadata" not in forwarded
 
         stream = await source.open_chat(
             "groq", {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "hi"}]}

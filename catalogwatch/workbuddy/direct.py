@@ -30,6 +30,16 @@ COOLDOWN_RATE_LIMIT = 60
 COOLDOWN_SERVER = 15
 COOLDOWN_AUTH = 300
 
+# OpenAI Chat Completions fields forwarded to a direct provider. Pool-specific
+# metadata (`session_id`, routing hints) must never leak into a provider request.
+DIRECT_BODY_KEYS = frozenset({
+    "model", "messages", "tools", "tool_choice", "temperature", "top_p",
+    "max_tokens", "max_completion_tokens", "stop", "presence_penalty",
+    "frequency_penalty", "n", "response_format", "seed", "user",
+    "reasoning_effort", "parallel_tool_calls", "logprobs", "top_logprobs",
+    "stream", "stream_options",
+})
+
 
 class DirectError(RuntimeError):
     """A direct provider refused or failed the chat request."""
@@ -212,7 +222,7 @@ class DirectSource:
         if key is None:
             raise DirectError(503, f"provider '{provider_id}' has no API key configured")
         headers, params = self._request_parts(cfg, key, stream=stream)
-        body = dict(payload)
+        body = {key_: value for key_, value in payload.items() if key_ in DIRECT_BODY_KEYS}
         body["stream"] = stream
         # `stream_options` is optional in the OpenAI spec and some
         # compatibility layers reject unknown fields; usage is recorded when
