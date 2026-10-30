@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+data
+exports
+.pytest_cache
+__pycache__
+**/__pycache__
+*.pyc
+.env
+tests
+vendor/buddy2api/docs
+vendor/buddy2api/tests

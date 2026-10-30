@@ -1,0 +1,148 @@
+# CatalogWatch configuration.
+#
+# - Model lists are polled on `poll_interval_minutes`.
+# - Quota documentation pages are fetched on each source's `interval_minutes`,
+#   normalized to text, hashed, and diffed. A change is an event.
+# - API keys live in the environment (see .env.example), never in this file.
+# - `key_required: false` means the model list is public; a key is optional.
+
+database:
+  path: data/catalog.db
+
+notify:
+  macos: true
+  webhook_url_env: CATALOGWATCH_WEBHOOK_URL
+  max_events_per_message: 5
+
+# Optional: when a quota page changes, ask an OpenAI-compatible model to turn the
+# page into structured quota JSON. Point base_url at freellmapi if you run it.
+extractor:
+  enabled: false
+  base_url: http://127.0.0.1:3001/v1
+  model: auto:fast
+  api_key_env: FREELMAPI_KEY
+  max_chars: 12000
+
+providers:
+  - id: openrouter
+    name: OpenRouter
+    adapter: openrouter
+    base_url: https://openrouter.ai/api/v1
+    key_env: OPENROUTER_API_KEY
+    key_required: false          # /models is public; the key is for inference
+    auth: bearer
+    free_kind: zero_price        # free == prompt and completion price are both 0
+    poll_interval_minutes: 15
+    notes: "Model list includes pricing. Zero-price models are flagged free."
+    quota_sources:
+      - label: limits
+        url: https://openrouter.ai/docs/api-reference/limits
+        interval_minutes: 60
+
+  - id: groq
+    name: Groq
+    adapter: openai_models
+    base_url: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+    free_kind: free_tier
+    poll_interval_minutes: 30
+    quota_sources:
+      - label: rate-limits
+        url: https://console.groq.com/docs/rate-limits
+        interval_minutes: 60
+
+  - id: cerebras
+    name: Cerebras
+    adapter: openai_models
+    base_url: https://api.cerebras.ai/v1
+    key_env: CEREBRAS_API_KEY
+    free_kind: free_tier
+    poll_interval_minutes: 30
+    quota_sources:
+      - label: rate-limits
+        url: https://inference-docs.cerebras.ai/support/rate-limits
+        interval_minutes: 60
+
+  - id: google
+    name: Google Gemini
+    adapter: google_models
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    key_env: GEMINI_API_KEY
+    auth: query
+    auth_param: key
+    free_kind: free_tier
+    poll_interval_minutes: 30
+    quota_sources:
+      - label: rate-limits
+        url: https://ai.google.dev/gemini-api/docs/rate-limits
+        interval_minutes: 60
+
+  - id: mistral
+    name: Mistral
+    adapter: openai_models
+    base_url: https://api.mistral.ai/v1
+    key_env: MISTRAL_API_KEY
+    free_kind: free_tier
+    poll_interval_minutes: 30
+
+  - id: cohere
+    name: Cohere
+    adapter: openai_models
+    base_url: https://api.cohere.com/v1
+    key_env: COHERE_API_KEY
+    free_kind: free_tier
+    poll_interval_minutes: 45
+    quota_sources:
+      - label: rate-limits
+        url: https://docs.cohere.com/docs/rate-limits
+        interval_minutes: 120
+
+  - id: sambanova
+    name: SambaNova
+    adapter: openai_models
+    base_url: https://api.sambanova.ai/v1
+    key_env: SAMBANOVA_API_KEY
+    key_required: false          # model list is public
+    free_kind: free_tier
+    poll_interval_minutes: 30
+
+  - id: nvidia
+    name: NVIDIA NIM
+    adapter: openai_models
+    base_url: https://integrate.api.nvidia.com/v1
+    key_env: NVIDIA_API_KEY
+    key_required: false          # model list is public; inference needs an nvapi- key
+    free_kind: free_tier         # free prototyping: rate-limited, not token-billed
+    poll_interval_minutes: 30
+    notes: "~40 RPM / 10,000 requests per day; limits vary by model and traffic."
+    quota_sources:
+      - label: rate-limits
+        url: https://build.nvidia.com/faq
+        interval_minutes: 60
+        # Client-rendered page: copy is embedded as escaped JSON in a script tag.
+        fields: ["requestsPerMinute", "requestsPerDay"]
+
+  - id: zai
+    name: Z.ai (Zhipu)
+    adapter: openai_models
+    base_url: https://api.z.ai/api/paas/v4
+    key_env: ZAI_API_KEY
+    free_kind: free_tier
+    poll_interval_minutes: 30
+    quota_sources:
+      - label: pricing
+        url: https://docs.z.ai/guides/overview/pricing
+        interval_minutes: 120
+
+  # Optional local WorkBuddy bridge (Buddy2api). Disabled for plain local use.
+  # The container bootstrap enables it and injects WORKBUDDY_GATEWAY_KEY.
+  - id: workbuddy
+    name: WorkBuddy (local bridge)
+    adapter: workbuddy
+    base_url: http://127.0.0.1:8787/v1
+    key_env: WORKBUDDY_GATEWAY_KEY
+    key_required: true
+    free_kind: free_tier
+    poll_interval_minutes: 30
+    enabled: false
+    notes: "Unofficial local bridge; browser login; consumes your own account quota."

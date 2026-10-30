@@ -1,0 +1,142 @@
+name: docker
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Compute lowercase image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build smoke image
+        run: docker build -t free-llm-api:smoke .
+
+      - name: Start container and probe both services
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/appdata"
+          docker run -d --name free-llm-smoke \
+            -p 127.0.0.1:18787:8787 \
+            -p 127.0.0.1:18788:8788 \
+            -e CB_GATEWAY_ADMIN_TOKEN=smoke-admin-token \
+            -v "$RUNNER_TEMP/appdata:/data" \
+            free-llm-api:smoke
+
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18788/healthz >/dev/null 2>&1 \
+               && curl -fsS http://127.0.0.1:18787/health >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "1" ]; then
+            echo "container did not become healthy" >&2
+            docker logs free-llm-smoke || true
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:18787/health
+          curl -fsS http://127.0.0.1:18788/healthz
+
+          KEY="$(docker exec free-llm-smoke cat /data/secrets/gateway_key)"
+          test -n "$KEY"
+          curl -fsS -H "Authorization: Bearer $KEY" \
+            http://127.0.0.1:18787/v1/models
+
+          # Console (first phase): static UI + admin session/token auth.
+          curl -fsS http://127.0.0.1:18788/ | grep -q "WorkBuddy Pool"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18788/api/overview)" = "401"
+          ADMIN="$(docker exec free-llm-smoke cat /data/secrets/catalogwatch_admin_token)"
+          test -n "$ADMIN"
+          curl -fsS -H "Authorization: Bearer $ADMIN" \
+            http://127.0.0.1:18788/api/overview
+          curl -fsS -H "Authorization: Bearer $ADMIN" \
+            http://127.0.0.1:18788/api/workbuddy/accounts
+
+          # The bootstrap must have enabled the WorkBuddy provider in the
+          # generated CatalogWatch config.
+          docker exec free-llm-smoke /opt/venv/bin/python -c \
+            "import yaml; d=yaml.safe_load(open('/data/catalogwatch/providers.yaml')); p=[x for x in d['providers'] if x['id']=='workbuddy'][0]; assert p['enabled'] is True and p['base_url'].endswith(':8787/v1'), p"
+          curl -fsS http://127.0.0.1:18788/providers | grep -q workbuddy
+
+      - name: Container logs
+        if: always()
+        run: docker logs free-llm-smoke || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f free-llm-smoke || true

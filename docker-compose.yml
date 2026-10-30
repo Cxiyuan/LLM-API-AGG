@@ -1,0 +1,44 @@
+# Deployment compose file.
+#
+# The image is built by GitHub Actions and pushed to GHCR. This file does not
+# build locally. Set FREE_LLM_API_IMAGE in .env, for example:
+#
+#   FREE_LLM_API_IMAGE=ghcr.io/your-user/llm-api-agg:latest
+#
+# Then:
+#
+#   docker compose pull
+#   docker compose up -d
+#   docker compose exec app workbuddy-login --realm cn
+#
+# Both ports are bound to 127.0.0.1 on the host. The admin UI and the
+# OpenAI-compatible gateway share port 8787; never publish it as 0.0.0.0.
+# On a remote server, use an SSH tunnel:
+#
+#   ssh -L 8787:127.0.0.1:8787 -L 8788:127.0.0.1:8788 user@server
+
+services:
+  app:
+    image: ${FREE_LLM_API_IMAGE:?Set FREE_LLM_API_IMAGE to the GHCR image built by CI}
+    container_name: llm-api-agg
+    init: true
+    restart: unless-stopped
+    pull_policy: always
+    ports:
+      - "127.0.0.1:8787:8787"   # Buddy2api: WorkBuddy login + /v1 gateway
+      - "127.0.0.1:8788:8788"   # CatalogWatch API
+    volumes:
+      - ./data:/data
+    environment:
+      CB_GATEWAY_ADMIN_TOKEN: ${CB_GATEWAY_ADMIN_TOKEN:-}
+      CB_GATEWAY_MASTER_KEY: ${CB_GATEWAY_MASTER_KEY:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/app/deploy/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3

@@ -1,0 +1,593 @@
+"""Console/admin JSON API for the WorkBuddy pool."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from ..util import parse_since, utcnow_iso
+from .auth import (
+    clear_login_failures,
+    clear_session_cookies,
+    create_admin_session,
+    hash_pool_key,
+    login_allowed,
+    new_pool_key,
+    note_login_failure,
+    require_admin,
+    set_session_cookies,
+    token_matches,
+)
+from .router import DEFAULT_POLICY
+from .service import WorkBuddyService
+
+router = APIRouter(prefix="/api")
+
+
+def _service(request: Request) -> WorkBuddyService:
+    service = getattr(request.app.state, "workbuddy", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="WorkBuddy pool is not initialized")
+    return service
+
+
+def _admin(request: Request, *, mutation: bool = False) -> tuple[WorkBuddyService, str]:
+    service = _service(request)
+    actor = require_admin(request, service.store, mutation=mutation)
+    return service, actor
+
+
+async def _body(request: Request) -> dict:
+    try:
+        value = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="JSON body required") from exc
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    return value
+
+
+def _audit(service: WorkBuddyService, actor: str, action: str, target: str | None = None, payload: Any = None) -> None:
+    service.store.audit(actor, action, target, payload)
+
+
+# ---------------------------------------------------------------------- auth
+
+@router.post("/auth/login")
+async def login(request: Request) -> JSONResponse:
+    service = _service(request)
+    client = request.client.host if request.client else "unknown"
+    if not login_allowed(client):
+        raise HTTPException(status_code=429, detail="Too many login attempts")
+    body = await _body(request)
+    token = str(body.get("token") or "")
+    if not token_matches(token):
+        note_login_failure(client)
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+    clear_login_failures(client)
+    session_id, csrf, expires = create_admin_session(
+        service.store, user_agent=request.headers.get("user-agent")
+    )
+    response = JSONResponse({"ok": True, "expires_at": expires})
+    set_session_cookies(response, session_id, csrf)
+    service.store.audit("session", "login", None, {"client": client})
+    return response
+
+
+@router.post("/auth/logout")
+async def logout(request: Request) -> JSONResponse:
+    service = _service(request)
+    session_id = request.cookies.get("cw_admin", "")
+    if session_id:
+        from .auth import _hash_session
+
+        service.store.delete_session(_hash_session(session_id))
+    response = JSONResponse({"ok": True})
+    clear_session_cookies(response)
+    return response
+
+
+@router.get("/auth/session")
+async def session(request: Request) -> dict:
+    service, actor = _admin(request)
+    return {"ok": True, "actor": actor}
+
+
+# ------------------------------------------------------------------ overview
+
+@router.get("/overview")
+async def overview(request: Request) -> dict:
+    service, _actor = _admin(request)
+    bridge: dict = {"ok": False}
+    try:
+        bridge = await service.bridge.health()
+    except Exception as exc:  # noqa: BLE001 - health is best effort
+        bridge = {"ok": False, "error": str(exc)[:300]}
+    return {
+        "ok": True,
+        "overview": service.overview(),
+        "bridge": bridge,
+        "policy": service.router.policy() if hasattr(service, "router") else service.store.get_setting("policy", DEFAULT_POLICY),
+        "settings": {
+            "catalog_refresh_seconds": service.store.get_setting("catalog_refresh_seconds", 60),
+            "credit_refresh_seconds": service.store.get_setting("credit_refresh_seconds", 300),
+            "account_sync_seconds": service.store.get_setting("account_sync_seconds", 60),
+            "config_identity": service.catalog.identity(),
+        },
+        "config_snapshot": service.store.latest_config_snapshot(),
+        "updated_at": utcnow_iso(),
+    }
+
+
+# -------------------------------------------------------------------- models
+
+@router.get("/workbuddy/models")
+async def models(request: Request) -> dict:
+    service, _actor = _admin(request)
+    costs = service.catalog.list_costs()
+    return {
+        "items": costs,
+        "summary": {
+            "total": len(costs),
+            "free": sum(1 for item in costs if item.get("free")),
+            "known_cost": sum(1 for item in costs if item.get("credits") is not None),
+            "unknown_cost": sum(1 for item in costs if item.get("credits") is None),
+        },
+        "identity": service.catalog.identity(),
+        "config_snapshot": service.store.latest_config_snapshot(),
+    }
+
+
+@router.post("/workbuddy/catalog/refresh")
+async def refresh_catalog(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    result = await service.refresh_catalog(force=True)
+    _audit(service, actor, "catalog.refresh", None, result)
+    return {"ok": True, "results": result}
+
+
+@router.put("/workbuddy/models/manual")
+async def set_manual_cost(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    provider = str(body.get("provider") or "").strip()
+    model_id = str(body.get("model_id") or "").strip()
+    if provider not in {"workbuddy", "workbuddy-i"} or not model_id:
+        raise HTTPException(status_code=400, detail="provider and model_id are required")
+    windows = body.get("daily_windows")
+    if windows is not None and not isinstance(windows, list):
+        raise HTTPException(status_code=400, detail="daily_windows must be an array")
+    service.store.upsert_manual_cost(
+        provider,
+        model_id,
+        base_credits=body.get("base_credits"),
+        factor=body.get("factor"),
+        daily_windows=windows or [],
+        timezone_name=str(body.get("timezone") or "Asia/Shanghai"),
+        valid_from=body.get("valid_from"),
+        valid_until=body.get("valid_until"),
+        enabled=bool(body.get("enabled", True)),
+    )
+    _audit(service, actor, "model.manual_cost", f"{provider}/{model_id}", body)
+    return {"ok": True}
+
+
+@router.delete("/workbuddy/models/manual")
+async def delete_manual_cost(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    provider = str(request.query_params.get("provider") or "").strip()
+    model_id = str(request.query_params.get("model_id") or "").strip()
+    if provider not in {"workbuddy", "workbuddy-i"} or not model_id:
+        raise HTTPException(status_code=400, detail="provider and model_id are required")
+    service.store.delete_manual_cost(provider, model_id)
+    _audit(service, actor, "model.manual_cost.delete", f"{provider}/{model_id}")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------- accounts
+
+@router.get("/workbuddy/accounts")
+async def accounts(request: Request) -> dict:
+    service, _actor = _admin(request)
+    return {"items": service.accounts.summary()}
+
+
+@router.post("/workbuddy/accounts/sync")
+async def sync_accounts(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    items = await service.refresh_accounts()
+    _audit(service, actor, "accounts.sync", None, {"count": len(items)})
+    return {"ok": True, "items": items}
+
+
+@router.post("/workbuddy/login/start")
+async def login_start(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    result = await service.accounts.login_start(str(body.get("realm") or "cn"))
+    _audit(service, actor, "account.login.start", None, {"realm": body.get("realm")})
+    return result
+
+
+@router.get("/workbuddy/login/poll")
+async def login_poll(request: Request, state: str = "") -> dict:
+    service, _actor = _admin(request)
+    if not state.strip():
+        raise HTTPException(status_code=400, detail="state is required")
+    result = await service.accounts.login_poll(state)
+    if isinstance(result, dict) and result.get("done"):
+        _audit(service, actor="session", action="account.login.done", payload=result)
+    return result
+
+
+@router.get("/workbuddy/accounts/discover")
+async def discover_accounts(request: Request) -> dict:
+    service, _actor = _admin(request)
+    return await service.accounts.discover(dict(request.query_params))
+
+
+@router.post("/workbuddy/accounts/import")
+async def import_accounts(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    result = await service.accounts.import_accounts(body)
+    _audit(service, actor, "accounts.import", None, {"channel": body.get("channel")})
+    return result
+
+
+@router.patch("/workbuddy/accounts/{account_id}")
+async def update_account(account_id: int, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    result = await service.accounts.update_account(account_id, body)
+    _audit(service, actor, "account.update", str(account_id), body)
+    return result
+
+
+@router.delete("/workbuddy/accounts/{account_id}")
+async def delete_account(account_id: int, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    await service.accounts.delete_account(account_id)
+    _audit(service, actor, "account.delete", str(account_id))
+    return {"ok": True}
+
+
+@router.post("/workbuddy/accounts/{account_id}/refresh")
+async def refresh_account(account_id: int, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    result = await service.accounts.refresh_account(account_id)
+    _audit(service, actor, "account.refresh", str(account_id))
+    return {"ok": True, "result": result}
+
+
+@router.post("/workbuddy/accounts/{account_id}/test")
+async def test_account(account_id: int, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request) if request.headers.get("content-length") not in {None, "0"} else {}
+    result = await service.accounts.test_account(account_id, body)
+    _audit(service, actor, "account.test", str(account_id), {"ok": result.get("ok")})
+    return result
+
+
+@router.put("/workbuddy/accounts/{account_id}/caps")
+async def set_caps(account_id: int, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    model_id = str(body.get("model_id") or "*")
+    service.store.set_cap(
+        account_id,
+        model_id,
+        daily_request_cap=int(body.get("daily_request_cap") or 0),
+        daily_credit_cap=float(body.get("daily_credit_cap") or 0),
+    )
+    _audit(service, actor, "account.caps", str(account_id), {"model_id": model_id, **body})
+    return {"ok": True}
+
+
+# -------------------------------------------------------------------- credits
+
+@router.get("/workbuddy/credits")
+async def credits(request: Request) -> dict:
+    service, _actor = _admin(request)
+    items = []
+    for account in service.store.list_accounts(present=True):
+        items.append(
+            {
+                "account_id": account["account_id"],
+                "name": account.get("nickname") or account.get("name"),
+                "provider": account.get("provider"),
+                "available_credits": account.get("available_credits"),
+                "credit_expiring_30d": account.get("credit_expiring_30d"),
+                "latest": service.store.latest_credit(int(account["account_id"])),
+                "state": service.store.get_state(int(account["account_id"])),
+            }
+        )
+    return {"items": items}
+
+
+@router.post("/workbuddy/credits/refresh")
+async def refresh_credits(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    result = await service.refresh_credits(force=True)
+    _audit(service, actor, "credits.refresh", None, {"ok": result.get("ok")})
+    return result
+
+
+# --------------------------------------------------------------- check-in
+
+async def _bridge_settings(service: WorkBuddyService) -> dict:
+    settings = await service.accounts.settings()
+    return settings if isinstance(settings, dict) else {}
+
+
+@router.get("/workbuddy/checkin")
+async def checkin_status(request: Request) -> dict:
+    service, _actor = _admin(request)
+    return await service.accounts.checkin_status(force=False)
+
+
+@router.post("/workbuddy/checkin/run")
+async def checkin_run(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    result = await service.accounts.checkin_all()
+    _audit(service, actor, "checkin.run", None, {"total": result.get("total"), "claimed": result.get("claimed")})
+    return result
+
+
+@router.get("/workbuddy/checkin/settings")
+async def checkin_settings(request: Request) -> dict:
+    service, _actor = _admin(request)
+    settings = await _bridge_settings(service)
+    return {
+        "enabled": bool(settings.get("auto_checkin_enabled", False)),
+        "hour": int(settings.get("auto_checkin_hour", 9) or 9),
+    }
+
+
+@router.put("/workbuddy/checkin/settings")
+async def update_checkin_settings(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    enabled = bool(body.get("enabled"))
+    hour = int(body.get("hour") or 9)
+    if not 0 <= hour <= 23:
+        raise HTTPException(status_code=400, detail="hour must be 0..23")
+    if enabled and not body.get("confirm_risk"):
+        raise HTTPException(
+            status_code=400,
+            detail="Enabling automatic check-in requires confirm_risk=true",
+        )
+    result = await service.accounts.update_settings(
+        {"auto_checkin_enabled": enabled, "auto_checkin_hour": hour}
+    )
+    _audit(service, actor, "checkin.settings", None, {"enabled": enabled, "hour": hour})
+    return {"ok": True, "enabled": enabled, "hour": hour, "result": result}
+
+
+@router.get("/workbuddy/keepalive/settings")
+async def keepalive_settings(request: Request) -> dict:
+    service, _actor = _admin(request)
+    settings = await _bridge_settings(service)
+    return {
+        "enabled": bool(settings.get("keepalive_enabled", False)),
+        "hour": int(settings.get("keepalive_hour", 22) or 22),
+    }
+
+
+@router.put("/workbuddy/keepalive/settings")
+async def update_keepalive_settings(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    enabled = bool(body.get("enabled"))
+    hour = int(body.get("hour") or 22)
+    if not 0 <= hour <= 23:
+        raise HTTPException(status_code=400, detail="hour must be 0..23")
+    result = await service.accounts.update_settings(
+        {"keepalive_enabled": enabled, "keepalive_hour": hour}
+    )
+    _audit(service, actor, "keepalive.settings", None, {"enabled": enabled, "hour": hour})
+    return {"ok": True, "enabled": enabled, "hour": hour, "result": result}
+
+
+@router.get("/workbuddy/automation-logs")
+async def automation_logs(request: Request, limit: int = 100, failures_only: bool = False) -> Any:
+    service, _actor = _admin(request)
+    return await service.bridge.automation_logs(limit=limit, failures_only=failures_only)
+
+
+# ----------------------------------------------------------------------- keys
+
+@router.get("/keys")
+async def list_keys(request: Request) -> dict:
+    service, _actor = _admin(request)
+    return {"items": service.store.list_pool_keys()}
+
+
+@router.post("/keys")
+async def create_key(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    key, key_hash, prefix = new_pool_key()
+    kind = str(body.get("kind") or "agent")
+    if kind not in {"agent", "shared"}:
+        raise HTTPException(status_code=400, detail="kind must be agent or shared")
+    allowed = body.get("allowed_models")
+    if allowed is not None and not isinstance(allowed, list):
+        raise HTTPException(status_code=400, detail="allowed_models must be an array")
+    key_id = service.store.create_pool_key(
+        name=str(body.get("name") or "pool key")[:120],
+        key_hash=key_hash,
+        key_prefix=prefix,
+        kind=kind,
+        allowed_models=[str(item) for item in allowed] if allowed else None,
+        daily_request_limit=int(body.get("daily_request_limit") or 0),
+        daily_credit_limit=float(body.get("daily_credit_limit") or 0),
+        max_attempts=int(body.get("max_attempts") or 3),
+    )
+    _audit(service, actor, "key.create", str(key_id), {"name": body.get("name"), "kind": kind})
+    return {"ok": True, "id": key_id, "key": key, "prefix": prefix}
+
+
+@router.patch("/keys/{key_id}")
+async def update_key(key_id: int, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    fields: dict[str, Any] = {}
+    for key in ("name", "status", "daily_request_limit", "daily_credit_limit", "max_attempts"):
+        if key in body:
+            fields[key] = body[key]
+    if "allowed_models" in body:
+        allowed = body["allowed_models"]
+        if allowed is not None and not isinstance(allowed, list):
+            raise HTTPException(status_code=400, detail="allowed_models must be an array")
+        fields["allowed_models_json"] = (
+            json.dumps([str(item) for item in allowed]) if allowed else None
+        )
+    service.store.update_pool_key(key_id, fields)
+    _audit(service, actor, "key.update", str(key_id), {k: v for k, v in fields.items() if k != "key_hash"})
+    return {"ok": True}
+
+
+@router.delete("/keys/{key_id}")
+async def delete_key(key_id: int, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    service.store.delete_pool_key(key_id)
+    _audit(service, actor, "key.delete", str(key_id))
+    return {"ok": True}
+
+
+@router.post("/keys/{key_id}/rotate")
+async def rotate_key(key_id: int, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    old = service.store.get_pool_key(key_id)
+    if old is None:
+        raise HTTPException(status_code=404, detail="key not found")
+    key, key_hash, prefix = new_pool_key()
+    new_id = service.store.create_pool_key(
+        name=old.get("name") or "pool key",
+        key_hash=key_hash,
+        key_prefix=prefix,
+        kind=old.get("kind") or "agent",
+        allowed_models=old.get("allowed_models"),
+        daily_request_limit=int(old.get("daily_request_limit") or 0),
+        daily_credit_limit=float(old.get("daily_credit_limit") or 0),
+        max_attempts=int(old.get("max_attempts") or 3),
+    )
+    service.store.delete_pool_key(key_id)
+    _audit(service, actor, "key.rotate", str(key_id), {"new_id": new_id})
+    return {"ok": True, "id": new_id, "key": key, "prefix": prefix}
+
+
+# ------------------------------------------------------------------ requests
+
+@router.get("/requests")
+async def requests_list(request: Request, limit: int = 100, offset: int = 0) -> dict:
+    service, _actor = _admin(request)
+    filters = dict(request.query_params)
+    return {
+        "items": service.store.list_requests(limit=limit, offset=offset, filters=filters)
+    }
+
+
+@router.get("/requests/{request_id}")
+async def request_detail(request: Request, request_id: str) -> dict:
+    service, _actor = _admin(request)
+    item = service.store.get_request(request_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="request not found")
+    return {"item": item, "attempts": service.store.list_attempts(request_id)}
+
+
+# -------------------------------------------------------------------- policy
+
+@router.get("/policy")
+async def get_policy(request: Request) -> dict:
+    service, _actor = _admin(request)
+    merged = dict(DEFAULT_POLICY)
+    value = service.store.get_setting("policy", {})
+    if isinstance(value, dict):
+        merged.update(value)
+    return merged
+
+
+@router.put("/policy")
+async def update_policy(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    merged = dict(DEFAULT_POLICY)
+    current = service.store.get_setting("policy", {})
+    if isinstance(current, dict):
+        merged.update(current)
+    for key, value in body.items():
+        if key in DEFAULT_POLICY:
+            merged[key] = value
+    service.store.set_setting("policy", merged)
+    _audit(service, actor, "policy.update", None, merged)
+    return {"ok": True, "policy": merged}
+
+
+# ----------------------------------------------------------------- settings
+
+@router.get("/settings")
+async def get_settings(request: Request) -> dict:
+    service, _actor = _admin(request)
+    return {
+        "catalog_refresh_seconds": service.store.get_setting("catalog_refresh_seconds", 60),
+        "credit_refresh_seconds": service.store.get_setting("credit_refresh_seconds", 300),
+        "account_sync_seconds": service.store.get_setting("account_sync_seconds", 60),
+        "config_identity": service.catalog.identity(),
+    }
+
+
+@router.put("/settings")
+async def update_settings(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    allowed = {
+        "catalog_refresh_seconds": (30, 600),
+        "credit_refresh_seconds": (60, 3600),
+        "account_sync_seconds": (15, 900),
+    }
+    changed = {}
+    for key, (minimum, maximum) in allowed.items():
+        if key in body:
+            value = max(minimum, min(maximum, int(body[key])))
+            service.store.set_setting(key, value)
+            changed[key] = value
+    if "config_identity" in body:
+        identity = str(body["config_identity"]).lower()
+        if identity not in {"current", "desktop", "vscode"}:
+            raise HTTPException(status_code=400, detail="config_identity must be current/desktop/vscode")
+        service.store.set_setting("config_identity", identity)
+        changed["config_identity"] = identity
+    _audit(service, actor, "settings.update", None, changed)
+    return {"ok": True, "settings": changed}
+
+
+@router.get("/audit")
+async def audit(request: Request, limit: int = 100) -> dict:
+    service, _actor = _admin(request)
+    return {"items": service.store.list_audit(limit=limit)}
+
+
+@router.get("/events")
+async def events(request: Request, limit: int = 100) -> dict:
+    service, _actor = _admin(request)
+    catalog = getattr(request.app.state, "service", None)
+    if catalog is None:
+        return {"items": []}
+    rows = catalog.db.changes(parse_since("7d"), limit=limit)
+    return {"items": rows}
+
+
+@router.get("/bridge/status")
+async def bridge_status(request: Request) -> dict:
+    service, _actor = _admin(request)
+    try:
+        health = await service.bridge.health()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:300]}
+    return {"ok": True, "health": health}
