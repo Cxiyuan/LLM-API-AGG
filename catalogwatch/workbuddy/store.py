@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from ..db import Database
@@ -1051,6 +1051,119 @@ class WorkBuddyStore:
             (int(account_id), f"{day}%"),
         ).fetchone()
         return dict(row) if row else {"requests": 0, "tokens": 0, "credits": 0}
+
+    def pending_requests(
+        self, limit: int = 50, *, older_than_seconds: int = 30
+    ) -> list[dict]:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=max(0, older_than_seconds))
+        ).isoformat(timespec="seconds")
+        rows = self.conn.execute(
+            """
+            SELECT * FROM pool_requests
+             WHERE cost_source='pending' AND created_at <= ?
+             ORDER BY id LIMIT ?
+            """,
+            (cutoff, max(1, min(200, int(limit)))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reconcile_request(
+        self,
+        request_id: str,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        credits: float,
+        status_code: int,
+        finish_reason: str | None,
+    ) -> bool:
+        """Fill exact usage from the bridge log and adjust dependent counters."""
+        now = utcnow_iso()
+        with self.lock, self.conn:
+            row = self.conn.execute(
+                "SELECT * FROM pool_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            old_tokens = int(row["total_tokens"] or 0)
+            old_credits = float(row["credits"] or 0)
+            new_tokens = int(total_tokens)
+            new_credits = float(credits or 0)
+            delta_tokens = new_tokens - old_tokens
+            delta_credits = new_credits - old_credits
+            self.conn.execute(
+                """
+                UPDATE pool_requests SET
+                    prompt_tokens=?, completion_tokens=?, total_tokens=?,
+                    credits=?, credits_estimated=0, cost_source='reconciled',
+                    status_code=?, finish_reason=?, reconciled_at=?
+                WHERE request_id=?
+                """,
+                (
+                    int(prompt_tokens),
+                    int(completion_tokens),
+                    new_tokens,
+                    new_credits,
+                    int(status_code),
+                    finish_reason,
+                    now,
+                    request_id,
+                ),
+            )
+            key_id = row["pool_key_id"]
+            if key_id:
+                day = str(row["created_at"] or now)[:10]
+                self.conn.execute(
+                    """
+                    UPDATE pool_key_daily_usage SET
+                        tokens=MAX(0, tokens + ?),
+                        credits=MAX(0, credits + ?)
+                    WHERE pool_key_id=? AND usage_date=?
+                    """,
+                    (delta_tokens, delta_credits, int(key_id), day),
+                )
+                self.conn.execute(
+                    """
+                    UPDATE pool_keys SET
+                        total_tokens=MAX(0, total_tokens + ?),
+                        total_credits=MAX(0, total_credits + ?)
+                    WHERE id=?
+                    """,
+                    (delta_tokens, delta_credits, int(key_id)),
+                )
+            account_id = row["bridge_account_id"]
+            if account_id:
+                self.conn.execute(
+                    """
+                    UPDATE wb_account_state SET
+                        daily_tokens=MAX(0, daily_tokens + ?),
+                        daily_credits=MAX(0, daily_credits + ?),
+                        updated_at=?
+                    WHERE account_id=?
+                    """,
+                    (delta_tokens, delta_credits, now, int(account_id)),
+                )
+            attempt_no = int(row["attempts"] or 1)
+            self.conn.execute(
+                """
+                UPDATE pool_request_attempts SET credits=?, status_code=?
+                WHERE request_id=? AND attempt_no=?
+                """,
+                (new_credits, int(status_code), request_id, attempt_no),
+            )
+        return True
+
+    def mark_reconcile_unknown(self, request_id: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                """
+                UPDATE pool_requests SET cost_source='unknown', reconciled_at=?
+                WHERE request_id=? AND cost_source='pending'
+                """,
+                (utcnow_iso(), request_id),
+            )
 
     # ------------------------------------------------------------------- sessions
 

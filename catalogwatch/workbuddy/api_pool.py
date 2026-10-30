@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..util import utcnow_iso
 from .auth import require_pool_key
 from .gateway import PoolHTTPError, error_body
+from .messages import anthropic_error, to_anthropic_response, to_openai_request, translate_stream
 from .router import PoolError
 from .service import WorkBuddyService
 
@@ -174,6 +175,83 @@ async def responses(request: Request):
     except Exception as exc:  # noqa: BLE001
         return _error_response(exc)
     return JSONResponse(status_code=status, content=body, headers=headers)
+
+
+@router.post("/messages")
+async def messages(request: Request):
+    """Anthropic Messages compatibility for Claude Code and similar clients."""
+    service = _service(request)
+    key = require_pool_key(request, service.store)
+    payload = await _json_body(request)
+    if not isinstance(payload.get("messages"), list) or not payload.get("messages"):
+        return JSONResponse(
+            status_code=400,
+            content=anthropic_error(400, "messages is required"),
+        )
+    if payload.get("max_tokens") is None:
+        return JSONResponse(
+            status_code=400,
+            content=anthropic_error(400, "max_tokens is required"),
+        )
+
+    openai_payload = to_openai_request(payload)
+    request_model = str(payload.get("model") or "auto")
+
+    if payload.get("stream"):
+        try:
+            (
+                response,
+                attempt,
+                request_id,
+                attempt_no,
+                headers,
+                started,
+                key_info,
+            ) = await service.gateway.open_stream(openai_payload, key, endpoint="chat")
+        except (PoolError, PoolHTTPError) as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=anthropic_error(exc.status_code, str(exc)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=502,
+                content=anthropic_error(502, str(exc)),
+            )
+        raw_stream = service.gateway.stream_body(
+            response, attempt, request_id, attempt_no, key_info, started
+        )
+        return StreamingResponse(
+            translate_stream(raw_stream, request_model),
+            media_type="text/event-stream",
+            headers=headers,
+        )
+
+    try:
+        status, body, headers = await service.gateway.chat(
+            openai_payload, key, endpoint="chat"
+        )
+    except (PoolError, PoolHTTPError) as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=anthropic_error(exc.status_code, str(exc)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=502,
+            content=anthropic_error(502, str(exc)),
+        )
+    if status >= 400 or (isinstance(body, dict) and "error" in body):
+        message = body.get("error", {}).get("message") if isinstance(body, dict) and isinstance(body.get("error"), dict) else str(body)
+        return JSONResponse(
+            status_code=status,
+            content=anthropic_error(status, str(message)),
+        )
+    return JSONResponse(
+        status_code=200,
+        content=to_anthropic_response(body, request_model),
+        headers=headers,
+    )
 
 
 @router.get("/usage")

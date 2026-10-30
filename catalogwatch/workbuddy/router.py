@@ -23,6 +23,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "account_strategy": "expiring_first",
     "max_attempts": 3,
     "max_model_candidates": 4,
+    "free_429_threshold": 3,
     "unknown_cost": "after_known",
     "model_priority": {},
     "allow_models": [],

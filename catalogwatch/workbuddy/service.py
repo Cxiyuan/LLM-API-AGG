@@ -14,6 +14,7 @@ from .accounts import WorkBuddyAccounts
 from .bridge import BuddyBridge
 from .catalog import WorkBuddyCatalog, cost_summary
 from .gateway import PoolGateway
+from .reconcile import Reconciler
 from .router import PoolRouter
 from .store import WorkBuddyStore
 
@@ -42,6 +43,7 @@ class WorkBuddyService:
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)
         self.router = PoolRouter(self.store, self.catalog)
         self.gateway = PoolGateway(self.store, self.router, self.bridge)
+        self.reconciler = Reconciler(self.store, self.bridge)
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock(self, key: str) -> asyncio.Lock:
@@ -88,7 +90,13 @@ class WorkBuddyService:
         catalog_interval = _seconds(store, "catalog_refresh_seconds", 60, 30, 600)
         last = getattr(self, "_last", None)
         if last is None:
-            last = {"accounts": 0.0, "credits": 0.0, "catalog": 0.0, "sessions": 0.0}
+            last = {
+                "accounts": 0.0,
+                "credits": 0.0,
+                "catalog": 0.0,
+                "reconcile": 0.0,
+                "sessions": 0.0,
+            }
             self._last = last
 
         try:
@@ -113,6 +121,13 @@ class WorkBuddyService:
                 last["catalog"] = now
         except Exception:  # noqa: BLE001
             log.exception("workbuddy catalog refresh failed")
+        try:
+            if now - last["reconcile"] >= 30:
+                async with self._lock("reconcile"):
+                    await self.reconciler.reconcile()
+                last["reconcile"] = now
+        except Exception:  # noqa: BLE001
+            log.exception("workbuddy ledger reconciliation failed")
         try:
             if now - last["sessions"] >= 3600:
                 store.cleanup_sessions(utcnow_iso())

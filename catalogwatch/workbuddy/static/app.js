@@ -238,6 +238,8 @@
   }
 
   async function setCaps(accountId) {
+    const modelId = prompt("模型 ID（* = 账号级；也可填具体模型，如 glm-5.2）：", "*");
+    if (modelId === null) return;
     const requests = prompt("每日请求上限（0 = 不设本地上限）：", "0");
     if (requests === null) return;
     const credits = prompt("每日积分上限（0 = 不设）：", "0");
@@ -245,7 +247,11 @@
     try {
       await api(`/api/workbuddy/accounts/${accountId}/caps`, {
         method: "PUT",
-        body: JSON.stringify({ model_id: "*", daily_request_cap: Number(requests), daily_credit_cap: Number(credits) }),
+        body: JSON.stringify({
+          model_id: modelId.trim() || "*",
+          daily_request_cap: Number(requests),
+          daily_credit_cap: Number(credits),
+        }),
       });
       alert("已保存");
     } catch (error) {
@@ -426,8 +432,8 @@
     const name = el("input", { placeholder: "agent 名称" });
     const kind = el("select", {}, el("option", { value: "agent", text: "每 agent 独立" }), el("option", { value: "shared", text: "共享" }));
     const limit = el("input", { type: "number", min: "0", value: "0", placeholder: "每日请求上限" });
+    const creditLimit = el("input", { type: "number", min: "0", value: "0", placeholder: "每日积分上限" });
     const allowed = el("input", { placeholder: "允许模型，逗号分隔（留空=全部）" });
-    const output = el("pre", { class: "muted", text: "" });
     const create = el("button", {
       class: "primary",
       text: "创建 Key",
@@ -439,10 +445,11 @@
               name: name.value || "pool key",
               kind: kind.value,
               daily_request_limit: Number(limit.value || 0),
+              daily_credit_limit: Number(creditLimit.value || 0),
               allowed_models: allowed.value.trim() ? allowed.value.split(",").map((item) => item.trim()).filter(Boolean) : null,
             }),
           });
-          output.textContent = "只显示一次，请立即保存：\n" + result.key;
+          alert("新 Key 只显示一次，请立即保存：\n" + result.key);
           await loadKeys();
         } catch (error) {
           alert(error.message || String(error));
@@ -453,12 +460,24 @@
       el("div", {}, el("strong", { text: key.name }), el("div", { class: "muted", text: key.key_prefix + "… · " + key.kind })),
       badge(key.status, key.status === "active" ? "free" : "bad"),
       key.daily_request_limit || 0,
+      num(key.daily_credit_limit),
       key.total_requests || 0,
       num(key.total_credits),
       el(
         "div",
         { class: "row" },
-        el("button", { text: "轮换", onclick: async () => { await action(`/api/keys/${key.id}/rotate`, { method: "POST" }, loadKeys); } }),
+        el("button", {
+          text: "轮换",
+          onclick: async () => {
+            try {
+              const rotated = await api(`/api/keys/${key.id}/rotate`, { method: "POST" });
+              alert("新 Key 只显示一次，请立即保存：\n" + rotated.key);
+              await loadKeys();
+            } catch (error) {
+              alert(error.message || String(error));
+            }
+          },
+        }),
         el("button", { class: "danger", text: "删除", onclick: () => action(`/api/keys/${key.id}`, { method: "DELETE" }, loadKeys) })
       ),
     ]);
@@ -466,8 +485,8 @@
       el(
         "div",
         {},
-        card("池 API Key", el("div", { class: "form-grid" }, el("label", { class: "field" }, "名称", name), el("label", { class: "field" }, "类型", kind), el("label", { class: "field" }, "每日请求上限", limit), el("label", { class: "field" }, "模型白名单", allowed)), create, output),
-        card("已有 Key", table(["Key", "状态", "日请求上限", "总请求", "总积分", "操作"], rows))
+        card("池 API Key", el("div", { class: "form-grid" }, el("label", { class: "field" }, "名称", name), el("label", { class: "field" }, "类型", kind), el("label", { class: "field" }, "每日请求上限", limit), el("label", { class: "field" }, "每日积分上限", creditLimit), el("label", { class: "field" }, "模型白名单", allowed)), create),
+        card("已有 Key", table(["Key", "状态", "日请求上限", "日积分上限", "总请求", "总积分", "操作"], rows))
       )
     );
   }

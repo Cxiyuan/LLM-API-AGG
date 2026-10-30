@@ -164,6 +164,35 @@ def test_pool_key_and_chat_ledger(tmp_path, monkeypatch):
         assert "data:" in streamed.text
         assert streamed.headers["X-Pool-Model"] == "free-model"
 
+        # Anthropic Messages compatibility (non-stream + stream).
+        anthropic = client.post(
+            "/v1/messages",
+            headers={**auth, "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert anthropic.status_code == 200
+        assert anthropic.json()["type"] == "message"
+        assert anthropic.json()["content"][0]["text"] == "hello"
+
+        anthropic_stream = client.post(
+            "/v1/messages",
+            headers={**auth, "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert anthropic_stream.status_code == 200
+        assert "event: message_start" in anthropic_stream.text
+        assert "text_delta" in anthropic_stream.text
+        assert "event: message_stop" in anthropic_stream.text
+
 
 def test_pool_key_daily_limit(tmp_path, monkeypatch):
     monkeypatch.setenv("CATALOGWATCH_SCHEDULER", "0")
