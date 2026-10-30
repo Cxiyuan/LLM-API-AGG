@@ -247,6 +247,12 @@ class PoolRouter:
             return matches
 
         if provider is not None and self._is_direct(provider):
+            if self.direct is not None and self.direct.cooling(provider, model_id):
+                raise PoolError(
+                    "provider_cooling",
+                    f"Provider '{provider}' is cooling down after a recent failure",
+                    429,
+                )
             # Direct sources only proxy free models; a paid model must fail
             # loudly instead of quietly spending the user's balance.
             if self.direct is not None and self.direct.is_paid(provider, model_id):
