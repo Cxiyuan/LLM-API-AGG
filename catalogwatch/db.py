@@ -57,6 +57,14 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
 
+-- Provider API keys entered through the console, encrypted at rest by
+-- catalogwatch.keystore. Environment variables remain a fallback layer.
+CREATE TABLE IF NOT EXISTS provider_keys (
+    provider_id TEXT PRIMARY KEY,
+    ciphertext TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS quota_sources (
     id TEXT PRIMARY KEY,
     provider_id TEXT NOT NULL,

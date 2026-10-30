@@ -32,7 +32,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         service = CatalogService(settings)
-        pool = WorkBuddyService(settings, service.db)
+        pool = WorkBuddyService(settings, service.db, key_store=service.key_store)
         app.state.service = service
         app.state.workbuddy = pool
         stop = asyncio.Event()

@@ -5,6 +5,7 @@ description = "Near-real-time catalog of free LLM models and provider quota page
 requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12.3",
+  "cryptography>=42.0.0",
   "fastapi>=0.115.0",
   "httpx>=0.27.0",
   "python-dotenv>=1.0.1",

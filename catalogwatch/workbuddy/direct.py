@@ -62,9 +62,11 @@ class DirectSource:
         settings: Settings,
         store: Any,
         client: httpx.AsyncClient | None = None,
+        key_store: Any = None,
     ):
         self.settings = settings
         self.store = store
+        self.key_store = key_store
         self.client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=20.0, read=600.0, write=60.0, pool=20.0),
             follow_redirects=False,
@@ -91,7 +93,11 @@ class DirectSource:
 
     def key(self, provider_id: str) -> str | None:
         cfg = self.config(provider_id)
-        return None if cfg is None else provider_key(cfg)
+        if cfg is None:
+            return None
+        if self.key_store is not None:
+            return self.key_store.resolve(cfg)
+        return provider_key(cfg)
 
     def provider_ready(self, provider_id: str) -> bool:
         return self.key(provider_id) is not None
@@ -218,7 +224,7 @@ class DirectSource:
         cfg = self.config(provider_id)
         if cfg is None:
             raise DirectError(503, f"provider '{provider_id}' is not available for inference")
-        key = provider_key(cfg)
+        key = self.key(provider_id)
         if key is None:
             raise DirectError(503, f"provider '{provider_id}' has no API key configured")
         headers, params = self._request_parts(cfg, key, stream=stream)

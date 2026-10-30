@@ -6,6 +6,7 @@ import logging
 from .config import Settings
 from .db import Database
 from .extract import LLMExtractor
+from .keystore import ProviderKeyStore
 from .models import Event
 from .notify import Notifier
 from .poller import ModelPoller, PollResult
@@ -22,9 +23,10 @@ class CatalogService:
         self.db.sync_quota_sources(settings.providers)
 
         self.provider_map = {provider.id: provider for provider in settings.providers}
+        self.key_store = ProviderKeyStore(self.db)
         self.notifier = Notifier(settings.notify)
         self.extractor = LLMExtractor(settings.extractor)
-        self.poller = ModelPoller(settings, self.db)
+        self.poller = ModelPoller(settings, self.db, self.key_store.resolve)
         self.quota = QuotaMonitor(settings, self.db, self.extractor)
         self._locks: dict[str, asyncio.Lock] = {}
 

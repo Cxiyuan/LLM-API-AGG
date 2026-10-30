@@ -32,9 +32,10 @@ def _seconds(store: WorkBuddyStore, key: str, default: int, minimum: int, maximu
 
 
 class WorkBuddyService:
-    def __init__(self, settings: Settings, db: Database):
+    def __init__(self, settings: Settings, db: Database, key_store=None):
         self.settings = settings
         self.store = WorkBuddyStore(db)
+        self.key_store = key_store
         self.bridge = BuddyBridge(
             base_url=os.environ.get("BUDDY2API_URL", "http://127.0.0.1:8787"),
             admin_token=os.environ.get("CB_GATEWAY_ADMIN_TOKEN", ""),
@@ -43,7 +44,7 @@ class WorkBuddyService:
         self.catalog = WorkBuddyCatalog(self.store, self.bridge)
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)
         # Direct free-provider inference: WorkBuddy is just one resource source.
-        self.direct = DirectSource(settings, self.store)
+        self.direct = DirectSource(settings, self.store, key_store=key_store)
         self.router = PoolRouter(self.store, self.catalog, direct=self.direct)
         self.gateway = PoolGateway(
             self.store, self.router, self.bridge, direct=self.direct

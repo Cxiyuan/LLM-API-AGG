@@ -243,6 +243,121 @@ async def unified_models(request: Request) -> dict:
     }
 
 
+@router.get("/providers")
+async def providers(request: Request) -> dict:
+    """Provider list with key status (never the key itself)."""
+    service, _actor = _admin(request)
+    catalog = getattr(request.app.state, "service", None)
+    status_rows = {
+        row["id"]: row for row in catalog.db.providers()
+    } if catalog is not None else {}
+    items: list[dict[str, Any]] = []
+    for cfg in service.settings.providers:
+        info = (
+            service.key_store.describe(cfg)
+            if getattr(service, "key_store", None) is not None
+            else {"configured": False, "source": None}
+        )
+        status = status_rows.get(cfg.id, {})
+        items.append(
+            {
+                "id": cfg.id,
+                "name": cfg.name,
+                "adapter": cfg.adapter,
+                "base_url": cfg.base_url,
+                "key_env": cfg.key_env,
+                "enabled": cfg.enabled,
+                "chat_enabled": bool(cfg.chat_enabled and cfg.id not in BRIDGE_PROVIDERS),
+                "configured": info.get("configured", False),
+                "source": info.get("source"),
+                "model_count": status.get("model_count") or 0,
+                "free_model_count": status.get("free_model_count") or 0,
+                "last_status": status.get("last_status"),
+                "last_error": status.get("last_error"),
+                "last_polled_at": status.get("last_polled_at"),
+            }
+        )
+    return {"items": items, "updated_at": utcnow_iso()}
+
+
+def _provider_config(service: WorkBuddyService, provider_id: str):
+    for cfg in service.settings.providers:
+        if cfg.id == provider_id:
+            return cfg
+    return None
+
+
+@router.put("/providers/{provider_id}/key")
+async def set_provider_key(provider_id: str, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    api_key = str(body.get("api_key") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key must not be empty")
+    cfg = _provider_config(service, provider_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider: {provider_id}")
+    if provider_id in BRIDGE_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail="WorkBuddy uses the bridge login, not a provider API key",
+        )
+    store = getattr(service, "key_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="provider key storage is unavailable")
+    try:
+        store.set(provider_id, api_key)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    _audit(service, actor, "provider.key.set", provider_id)
+    return {"ok": True, **_describe_key(service, cfg)}
+
+
+@router.delete("/providers/{provider_id}/key")
+async def clear_provider_key(provider_id: str, request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    cfg = _provider_config(service, provider_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider: {provider_id}")
+    store = getattr(service, "key_store", None)
+    if store is not None:
+        store.unset(provider_id)
+    _audit(service, actor, "provider.key.clear", provider_id)
+    return {"ok": True, **_describe_key(service, cfg)}
+
+
+@router.post("/providers/{provider_id}/poll")
+async def poll_provider(provider_id: str, request: Request) -> dict:
+    """Fetch this provider's catalog with the current key (tests the key)."""
+    service, actor = _admin(request, mutation=True)
+    catalog = getattr(request.app.state, "service", None)
+    if catalog is None:
+        raise HTTPException(status_code=503, detail="catalog service is unavailable")
+    if _provider_config(service, provider_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider: {provider_id}")
+    try:
+        result, _events = await catalog.poll_provider(provider_id, notify=False)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit(service, actor, "provider.poll", provider_id, {"status": result.status})
+    return {
+        "ok": result.status == "ok",
+        "status": result.status,
+        "model_count": result.model_count,
+        "free_model_count": result.free_model_count,
+        "new_models": result.new_models,
+        "removed_models": result.removed_models,
+        "error": result.error,
+    }
+
+
+def _describe_key(service: WorkBuddyService, cfg) -> dict:
+    store = getattr(service, "key_store", None)
+    if store is None:
+        return {"configured": False, "source": None}
+    return store.describe(cfg)
+
+
 @router.get("/catalog/free")
 async def catalog_free(request: Request, q: str = "") -> dict:
     """Text-only free models from the provider directory (no bridges)."""

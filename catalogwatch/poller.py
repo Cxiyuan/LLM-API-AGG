@@ -34,12 +34,18 @@ class PollResult:
 
 
 class ModelPoller:
-    def __init__(self, settings: Settings, db: Database):
+    def __init__(self, settings: Settings, db: Database, key_resolver=None):
         self.settings = settings
         self.db = db
+        self.key_resolver = key_resolver
 
     async def poll(self, cfg: ProviderConfig) -> tuple[PollResult, list[Event]]:
-        api_key = resolve_env(cfg.key_env)
+        # Console-stored key first, environment second.
+        api_key = (
+            self.key_resolver(cfg)
+            if self.key_resolver is not None
+            else resolve_env(cfg.key_env)
+        )
 
         if cfg.auth != "none" and cfg.key_required and not api_key:
             error = f"{cfg.key_env or 'API key'} is not set"

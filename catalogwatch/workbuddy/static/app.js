@@ -281,6 +281,113 @@
     render();
   }
 
+  // --------------------------------------------------------------- provider keys
+
+  async function loadProviders() {
+    const data = await api("/api/providers");
+    const items = data.items || [];
+    const body = el("tbody");
+
+    function statusBadge(item) {
+      if (item.configured) {
+        return el("span", {},
+          badge("已配置", "ok"),
+          " ",
+          el("span", { class: "muted", text: item.source === "console" ? "控制台" : "环境变量" }));
+      }
+      return badge("未配置", "bad");
+    }
+
+    for (const item of items) {
+      const isBridge = item.id === "workbuddy" || item.id === "workbuddy-i";
+      const statusCell = el("td", {}, statusBadge(item));
+      const pollCell = el("td", {},
+        el("div", { text: item.last_status || "—" }),
+        el("div", { class: "muted", text: (item.last_error || "").slice(0, 120) }));
+      const input = el("input", {
+        type: "password",
+        autocomplete: "new-password",
+        placeholder: item.configured ? "输入新 Key 覆盖" : "粘贴 API Key",
+      });
+      const note = el("span", { class: "muted" });
+
+      async function save(test) {
+        const value = input.value.trim();
+        if (!value) { note.textContent = "请先输入 Key"; return; }
+        note.textContent = "保存中…";
+        try {
+          await api(`/api/providers/${encodeURIComponent(item.id)}/key`, {
+            method: "PUT",
+            body: JSON.stringify({ api_key: value }),
+          });
+          input.value = "";
+          item.configured = true;
+          item.source = "console";
+          statusCell.replaceChildren(statusBadge(item));
+          note.textContent = "已保存";
+          if (test) {
+            note.textContent = "已保存，拉取目录中…";
+            const result = await api(`/api/providers/${encodeURIComponent(item.id)}/poll`, { method: "POST" });
+            pollCell.replaceChildren(
+              el("div", { text: result.status }),
+              el("div", { class: "muted", text: result.ok
+                ? `${result.model_count} 个模型（免费 ${result.free_model_count}）`
+                : (result.error || "") }));
+            note.textContent = result.ok
+              ? `测试通过：${result.model_count} 个模型`
+              : `保存成功，拉取失败：${result.error || result.status}`;
+          }
+        } catch (error) {
+          note.textContent = error.message || String(error);
+        }
+      }
+
+      async function clear() {
+        if (!confirm(`清除 ${item.name} 的 API Key？`)) return;
+        note.textContent = "清除中…";
+        try {
+          await api(`/api/providers/${encodeURIComponent(item.id)}/key`, { method: "DELETE" });
+          item.configured = false;
+          item.source = null;
+          statusCell.replaceChildren(statusBadge(item));
+          note.textContent = "已清除（若环境变量仍有值会继续生效）";
+        } catch (error) {
+          note.textContent = error.message || String(error);
+        }
+      }
+
+      body.append(el("tr", {},
+        el("td", {},
+          el("strong", { text: item.name }),
+          el("div", { class: "muted", text: item.id + (isBridge ? " · 桥接" : item.chat_enabled ? " · 可直连" : " · 仅目录") })),
+        statusCell,
+        el("td", {}, el("code", { text: item.key_env || "—" })),
+        el("td", { text: `${item.model_count} / 免费 ${item.free_model_count}` }),
+        pollCell,
+        el("td", {}, input, el("div", { class: "muted" }, note)),
+        el("td", {},
+          isBridge
+            ? el("span", { class: "muted", text: "用桥接登录" })
+            : el("div", { class: "row" },
+              el("button", { class: "primary", text: "保存", onclick: () => save(false) }),
+              el("button", { text: "保存并测试", onclick: () => save(true) }),
+              el("button", { class: "danger", text: "清除", onclick: clear })))
+      ));
+    }
+
+    setView(card("厂商 API Key",
+      el("p", { class: "muted", text: "在这里录入后立即生效（加密存 SQLite）；环境变量仍可作为兜底。保存并测试会立刻拉取该厂商目录，验证 Key 是否可用。" }),
+      el("p", { class: "muted", text: "只有 OpenAI 兼容的免费文本模型会进入统一 /v1；WorkBuddy 用账号登录，不在这里填 Key。" }),
+      el("table", {},
+        el("thead", {}, el("tr", {},
+          ...["厂商", "Key 状态", "环境变量", "模型 / 免费", "最近轮询", "新 Key", "操作"].map((name) => el("th", { text: name })))),
+        body))
+    );
+    if (!items.length) {
+      body.append(el("tr", {}, el("td", { colspan: "7", class: "empty", text: "没有可配置的厂商" })));
+    }
+  }
+
   // ----------------------------------------------------------------- free catalog
 
   async function loadCatalog() {
@@ -816,6 +923,7 @@
     overview: loadOverview,
     resources: loadResources,
     catalog: loadCatalog,
+    providers: loadProviders,
     accounts: loadAccounts,
     models: loadModels,
     checkin: loadCheckin,
