@@ -77,22 +77,22 @@ async def list_models(request: Request) -> dict:
             "id": "auto",
             "object": "model",
             "created": 0,
-            "owned_by": "workbuddy-pool",
-            "description": "Cost-aware pool selection: free now, then low multiplier; night promotions apply",
+            "owned_by": "llm-agg",
+            "description": "Global cost/load-aware selection across all sources: free first, then low multiplier",
         },
         {
             "id": "free",
             "object": "model",
             "created": 0,
-            "owned_by": "workbuddy-pool",
-            "description": "Only models that are free at the current time",
+            "owned_by": "llm-agg",
+            "description": "Only models that are free at the current time (all sources)",
         },
         {
             "id": "cheap",
             "object": "model",
             "created": 0,
-            "owned_by": "workbuddy-pool",
-            "description": "Lowest current effective multiplier",
+            "owned_by": "llm-agg",
+            "description": "Lowest current effective multiplier across all sources",
         },
     ]
     resources = list(service.catalog.list_costs())
