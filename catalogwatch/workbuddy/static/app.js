@@ -271,6 +271,7 @@
             el("label", { class: "chip" }, only, " 只看可调用"),
             el("button", { text: "刷新", onclick: () => loadResources().catch((error) => setView(card("加载失败", errorBox(error)))) })),
           el("p", { class: "muted", text: "WorkBuddy 是其中一个来源；免费厂商模型只要配置了 Key 且属于免费目录，就直接由统一 /v1 调用。会话亲和与负载路由对所有可调用资源生效。" }),
+          el("p", { class: "muted", text: "免费标记来自厂商目录（OpenRouter 按零价，其余按 free_tier）；实际额度以厂商账户为准。付费模型不会被代理。" }),
           tableNode)),
         card("接入说明",
           el("p", { class: "muted", text: "WorkBuddy：控制台登录账号后，模型自动上架。" }),
