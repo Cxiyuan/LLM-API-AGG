@@ -24,7 +24,9 @@ DEFAULT_POLICY: dict[str, Any] = {
     "allow_over_max": False,
     "min_credit_reserve": 0,
     "account_strategy": "expiring_first",
-    "max_attempts": 3,
+    # One extra attempt: provider catalogs can list entries the account cannot
+    # serve; a bad pick should not sink the whole alias request.
+    "max_attempts": 4,
     "max_model_candidates": 4,
     "free_429_threshold": 3,
     "unknown_cost": "after_known",
@@ -336,7 +338,13 @@ class PoolRouter:
 
         filtered = []
         for item in costs:
+            provider = str(item.get("provider"))
+            model_id = str(item.get("model_id"))
             wire_id = self._wire_id(item)
+            if self.load.cooling(provider, model_id):
+                # A provider may list a catalog entry it cannot serve for this
+                # account ("Function not found"); do not keep picking it.
+                continue
             if not self._model_allowed(item["model_id"], wire_id, key, policy):
                 continue
             if not self._capable(item, intent):
@@ -576,6 +584,8 @@ class PoolRouter:
         else:
             cost = self.catalog.effective_cost(provider, model_id)
         if cost is None or not cost.get("present", True):
+            return None
+        if self.load.cooling(provider, model_id):
             return None
         if not self._capable(cost, intent):
             return None

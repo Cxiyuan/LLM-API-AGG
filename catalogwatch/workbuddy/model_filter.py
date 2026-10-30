@@ -31,8 +31,10 @@ NON_TEXT_MARKERS = (
     # Image generation / editing
     "image", "dall-e", "dalle", "imagen", "flux", "stable-diffusion", "sdxl",
     "midjourney", "seedream", "kolors",
-    # Non-chat endpoints
-    "embedding", "embed-", "rerank", "moderation",
+    # Non-chat endpoints (safety/guard/classification models are listed by some
+    # providers but cannot answer a chat completion)
+    "embedding", "embed-", "rerank", "moderation", "content-safety", "guard",
+    "safety", "reward-model", "classifier",
 )
 
 

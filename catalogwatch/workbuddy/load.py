@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from collections import defaultdict
 
 
@@ -18,6 +19,11 @@ class LoadTracker:
         self._model_inflight: dict[str, int] = defaultdict(int)
         self._account_inflight: dict[str, int] = defaultdict(int)
         self._stats: dict[str, dict] = {}
+        # Short-lived "do not route here" marks for models that rejected a
+        # request as unavailable (e.g. a provider catalog entry that is not
+        # provisioned for this account). Kept in memory like the rest of the
+        # live-routing state.
+        self._cooldowns: dict[str, float] = {}
 
     @staticmethod
     def _model_key(provider: str, model_id: str) -> str:
@@ -65,6 +71,23 @@ class LoadTracker:
             rate_target = 1.0 if status_code == 429 else 0.0
             stats["rate_limit"] += 0.1 * (rate_target - stats["rate_limit"])
             stats["total"] += 1
+
+    def cooldown(self, provider: str, model_id: str, seconds: float) -> None:
+        """Stop routing to one model for a while (model-specific failures)."""
+        key = self._model_key(provider, model_id)
+        with self._lock:
+            self._cooldowns[key] = time.monotonic() + max(1.0, float(seconds))
+
+    def cooling(self, provider: str, model_id: str) -> bool:
+        key = self._model_key(provider, model_id)
+        with self._lock:
+            until = self._cooldowns.get(key)
+            if until is None:
+                return False
+            if until <= time.monotonic():
+                self._cooldowns.pop(key, None)
+                return False
+            return True
 
     def stability(self, provider: str, model_id: str) -> float:
         key = self._model_key(provider, model_id)

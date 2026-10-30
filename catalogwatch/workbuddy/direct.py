@@ -29,6 +29,9 @@ BRIDGE_PROVIDERS = {"workbuddy", "workbuddy-i"}
 COOLDOWN_RATE_LIMIT = 60
 COOLDOWN_SERVER = 15
 COOLDOWN_AUTH = 300
+# A provider can list a model it does not serve for this account ("Function
+# not found"); stop retrying that exact model for a while.
+COOLDOWN_MODEL_UNAVAILABLE = 1800
 
 # OpenAI Chat Completions fields forwarded to a direct provider. Pool-specific
 # metadata (`session_id`, routing hints) must never leak into a provider request.
@@ -123,6 +126,8 @@ class DirectSource:
     def mark_cooldown(self, provider_id: str, model_id: str, status_code: int) -> None:
         if status_code == 429:
             seconds, key = COOLDOWN_RATE_LIMIT, (provider_id, model_id)
+        elif status_code == 404:
+            seconds, key = COOLDOWN_MODEL_UNAVAILABLE, (provider_id, model_id)
         elif status_code in {401, 403}:
             # A bad key is provider-wide; no point hammering the same endpoint.
             seconds, key = COOLDOWN_AUTH, (provider_id, "*")

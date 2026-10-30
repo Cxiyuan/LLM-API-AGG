@@ -298,6 +298,92 @@ def test_unified_inventory_marks_callable_and_catalog_free_filters_non_text(tmp_
         assert "groq/whisper-large-v3" not in free_ids
 
 
+def test_auto_retries_model_404_and_cools_the_model(tmp_path, monkeypatch):
+    """A catalog entry the provider cannot serve must not sink the whole request."""
+    monkeypatch.setenv("CATALOGWATCH_SCHEDULER", "0")
+    monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
+    monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BUDDY2API_URL", "http://127.0.0.1:1")
+
+    app = create_app(_settings(tmp_path))
+    with TestClient(app) as client:
+        service = app.state.workbuddy
+        now = "2026-10-30T00:00:00+00:00"
+        for model_id in ("aaa-bad", "zzz-good"):
+            service.store.conn.execute(
+                "INSERT INTO models (provider_id, model_id, name, context_length, max_output,"
+                " is_free, free_kind, fingerprint, first_seen, last_seen, present)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                ("groq", model_id, model_id, 32_000, 4096, 1, "free_tier", model_id, now, now),
+            )
+        service.store.conn.commit()
+        # Deterministic order: cost mode sorts by model_id.
+        service.store.set_setting("policy", {"routing_mode": "cost"})
+
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            calls.append(body["model"])
+            if body["model"] == "aaa-bad":
+                return httpx.Response(
+                    404,
+                    json={
+                        "status": 404,
+                        "title": "Not Found",
+                        "detail": "Function 'x': Not found for account 'y'",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {}},
+            )
+
+        service.direct.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        created = client.post(
+            "/api/keys",
+            headers={"Authorization": "Bearer test-admin-token"},
+            json={"name": "smoke", "kind": "shared"},
+        )
+        auth = {"Authorization": f"Bearer {created.json()['key']}"}
+
+        first = client.post(
+            "/v1/chat/completions",
+            headers={**auth, "X-Session-ID": "s1"},
+            json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert first.status_code == 200
+        assert first.headers["X-Pool-Model"] == "zzz-good"
+        assert calls[:2] == ["aaa-bad", "zzz-good"]
+
+        # The failed model is cooling, so the next request skips it entirely.
+        calls.clear()
+        second = client.post(
+            "/v1/chat/completions",
+            headers={**auth, "X-Session-ID": "s2"},
+            json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert second.status_code == 200
+        assert calls == ["zzz-good"]
+
+        # A session still bound to the bad model is re-planned and rebound.
+        service.store.upsert_session(
+            "s-bad", provider="groq", model_id="aaa-bad", account_id=None, ttl_seconds=600
+        )
+        calls.clear()
+        third = client.post(
+            "/v1/chat/completions",
+            headers={**auth, "X-Session-ID": "s-bad"},
+            json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert third.status_code == 200
+        assert calls[0] == "zzz-good"
+        binding = service.store.get_session("s-bad")
+        assert binding is not None and binding["model_id"] == "zzz-good"
+
+
 def test_unified_v1_serves_direct_model_with_session_affinity(tmp_path, monkeypatch):
     monkeypatch.setenv("CATALOGWATCH_SCHEDULER", "0")
     monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")

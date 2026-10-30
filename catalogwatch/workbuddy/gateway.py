@@ -36,7 +36,8 @@ def error_body(code: str, message: str) -> dict:
 
 def _retryable(status: int) -> bool:
     # 0 = direct-provider transport failure (no HTTP status reached us).
-    return status in {0, 401, 403, 408, 409, 425, 429, 500, 502, 503, 504}
+    # 404 = the catalog listed a model this account cannot serve; try another.
+    return status in {0, 401, 403, 404, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
 def _classify(status: int) -> str:
@@ -308,6 +309,7 @@ class PoolGateway:
         code: str,
         message: str,
         latency_ms: int,
+        session_id: str | None = None,
     ) -> None:
         account_id = (
             int(attempt.account["account_id"]) if attempt.account is not None else None
@@ -333,6 +335,22 @@ class PoolGateway:
             duration_ms=latency_ms,
             credits=None,
         )
+        if status_code == 404:
+            # Model-specific unavailability: the catalog lists an entry this
+            # account cannot serve ("Function ... not found"). Do not cool the
+            # whole account down; avoid this model and let the retry move on.
+            self.router.load.cooldown(attempt.provider, attempt.model_id, 1800)
+            if attempt.source == "direct" and self.direct is not None:
+                self.direct.mark_cooldown(attempt.provider, attempt.model_id, status_code)
+            if session_id:
+                binding = self.store.get_session(session_id)
+                if (
+                    binding is not None
+                    and str(binding.get("provider")) == attempt.provider
+                    and str(binding.get("model_id")) == attempt.model_id
+                ):
+                    self.store.delete_session(session_id)
+            return
         if attempt.source == "direct":
             if self.direct is not None:
                 self.direct.mark_cooldown(attempt.provider, attempt.model_id, status_code)
@@ -413,6 +431,7 @@ class PoolGateway:
                     code=_classify(exc.status_code),
                     message=str(exc),
                     latency_ms=latency,
+                    session_id=session_id,
                 )
                 if _retryable(exc.status_code) and attempt_no < len(attempts):
                     continue
@@ -434,6 +453,7 @@ class PoolGateway:
                     code="bad_upstream_response",
                     message=str(exc),
                     latency_ms=latency,
+                    session_id=session_id,
                 )
                 if attempt_no < len(attempts):
                     continue
@@ -520,6 +540,7 @@ class PoolGateway:
                     code=_classify(exc.status_code),
                     message=str(exc),
                     latency_ms=latency,
+                    session_id=session_id,
                 )
                 if _retryable(exc.status_code) and attempt_no < len(attempts):
                     continue
@@ -545,6 +566,7 @@ class PoolGateway:
                     code=code,
                     message=detail,
                     latency_ms=latency,
+                    session_id=session_id,
                 )
                 if _retryable(response.status_code) and attempt_no < len(attempts):
                     continue
@@ -623,6 +645,7 @@ class PoolGateway:
                 code="stream_error",
                 message=str(exc),
                 latency_ms=latency,
+                session_id=session_id,
             )
             self.store.finish_request(
                 request_id,
