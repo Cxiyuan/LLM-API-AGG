@@ -6,7 +6,9 @@ strictly pinned account, forwards to Buddy2api, and records the attempt ledger.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,6 +22,8 @@ from .bridge import BridgeError, BuddyBridge
 from .direct import DirectError, DirectSource
 from .router import ALIASES, Attempt, PoolError, PoolIntent, PoolRouter, extract_intent
 from .store import WorkBuddyStore
+
+log = logging.getLogger(__name__)
 
 
 class PoolHTTPError(RuntimeError):
@@ -376,6 +380,47 @@ class PoolGateway:
         else:
             self.store.note_failure(account_id, status_code, message, cooldown_until=_cooldown(30))
 
+    def _canceled(
+        self,
+        *,
+        attempt: Attempt,
+        request_id: str,
+        attempt_no: int,
+        latency_ms: int,
+    ) -> None:
+        """Client disconnected mid-stream: record it, but do not penalize the source."""
+        account_id = (
+            int(attempt.account["account_id"]) if attempt.account is not None else None
+        )
+        self.router.load.exit(attempt.provider, attempt.model_id, account_id)
+        self.router.load.record(
+            attempt.provider,
+            attempt.model_id,
+            account_id,
+            success=False,
+            status_code=499,
+            latency_ms=latency_ms,
+        )
+        self.store.record_attempt(
+            request_id=request_id,
+            attempt_no=attempt_no,
+            account_id=account_id,
+            model_id=attempt.model_id,
+            provider=attempt.provider,
+            status_code=499,
+            error_code="client_canceled",
+            started_at=utcnow_iso(),
+            duration_ms=latency_ms,
+            credits=None,
+        )
+        self.store.finish_request(
+            request_id,
+            status_code=499,
+            error_code="client_canceled",
+            attempts=attempt_no,
+            duration_ms=latency_ms,
+        )
+
     # ------------------------------------------------------------------ non-stream
 
     async def chat(
@@ -601,9 +646,12 @@ class PoolGateway:
     ) -> AsyncIterator[bytes]:
         buffer = b""
         last_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "credit": None, "finish_reason": None}
+        stream_error: Any = None
         try:
             async for chunk in response.aiter_bytes():
-                yield chunk
+                # Parse before yielding: a client may stop after the last content
+                # chunk, and a usage/finish event in that chunk must still land
+                # in the ledger.
                 buffer += chunk
                 if len(buffer) > 256_000:
                     buffer = buffer[-128_000:]
@@ -619,11 +667,47 @@ class PoolGateway:
                         value = json.loads(payload)
                     except (ValueError, UnicodeDecodeError):
                         continue
-                    if isinstance(value, dict) and isinstance(value.get("usage"), dict):
+                    if not isinstance(value, dict):
+                        continue
+                    if value.get("error"):
+                        # Provider-level error delivered inside the stream. The
+                        # client will see it too; record it so a 200-looking
+                        # request is not mistaken for success.
+                        stream_error = value.get("error")
+                    if isinstance(value.get("usage"), dict):
                         merged = _usage(value)
                         if merged.get("total_tokens") or merged.get("credit") is not None:
                             last_usage = merged
+                yield chunk
             latency = int((time.monotonic() - started) * 1000)
+            if stream_error is not None:
+                message = json.dumps(
+                    stream_error, ensure_ascii=False, default=str
+                )[:500]
+                log.warning(
+                    "llm-agg: stream error for %s/%s: %s",
+                    attempt.provider,
+                    attempt.model_id,
+                    message,
+                )
+                self._failure(
+                    attempt=attempt,
+                    request_id=request_id,
+                    attempt_no=attempt_no,
+                    status_code=502,
+                    code="stream_error",
+                    message=message,
+                    latency_ms=latency,
+                    session_id=session_id,
+                )
+                self.store.finish_request(
+                    request_id,
+                    status_code=502,
+                    error_code="stream_error",
+                    attempts=attempt_no,
+                    duration_ms=latency,
+                )
+                return
             self._success(
                 attempt=attempt,
                 request_id=request_id,
@@ -635,6 +719,17 @@ class PoolGateway:
                 session_id=session_id,
                 bind_session=bind_session,
             )
+        except asyncio.CancelledError:
+            # The consumer (agent) went away mid-stream. Record a distinct
+            # outcome instead of leaving the row empty; never cool the account.
+            latency = int((time.monotonic() - started) * 1000)
+            self._canceled(
+                attempt=attempt,
+                request_id=request_id,
+                attempt_no=attempt_no,
+                latency_ms=latency,
+            )
+            raise
         except httpx.HTTPError as exc:
             latency = int((time.monotonic() - started) * 1000)
             self._failure(
