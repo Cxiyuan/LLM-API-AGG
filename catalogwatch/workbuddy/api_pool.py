@@ -32,6 +32,28 @@ async def _json_body(request: Request) -> dict:
     return value
 
 
+def _session_id(request: Request, payload: dict) -> str | None:
+    for name in ("x-session-id", "x-session-Id", "x-claude-code-session-id"):
+        value = request.headers.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    for key in ("session_id", "sessionId"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("session_id", "sessionId"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:200]
+    return None
+
+
+def _bind_session_for(model: object) -> bool:
+    return str(model or "auto") in {"auto", "free", "cheap"}
+
+
 def _error_response(error: Exception) -> JSONResponse:
     if isinstance(error, (PoolError, PoolHTTPError)):
         return JSONResponse(
@@ -108,6 +130,7 @@ async def chat_completions(request: Request):
     service = _service(request)
     key = require_pool_key(request, service.store)
     payload = await _json_body(request)
+    session_id = _session_id(request, payload)
     if payload.get("stream"):
         try:
             (
@@ -118,21 +141,32 @@ async def chat_completions(request: Request):
                 headers,
                 started,
                 key_info,
-            ) = await service.gateway.open_stream(payload, key, endpoint="chat")
+            ) = await service.gateway.open_stream(
+                payload, key, endpoint="chat", session_id=session_id
+            )
         except (PoolError, PoolHTTPError) as exc:
             return _error_response(exc)
         except Exception as exc:  # noqa: BLE001
             return _error_response(exc)
         return StreamingResponse(
             service.gateway.stream_body(
-                response, attempt, request_id, attempt_no, key_info, started
+                response,
+                attempt,
+                request_id,
+                attempt_no,
+                key_info,
+                started,
+                session_id=session_id,
+                bind_session=_bind_session_for(payload.get("model")),
             ),
             media_type="text/event-stream",
             headers=headers,
         )
 
     try:
-        status, body, headers = await service.gateway.chat(payload, key, endpoint="chat")
+        status, body, headers = await service.gateway.chat(
+            payload, key, endpoint="chat", session_id=session_id
+        )
     except (PoolError, PoolHTTPError) as exc:
         return _error_response(exc)
     except Exception as exc:  # noqa: BLE001
@@ -145,6 +179,7 @@ async def responses(request: Request):
     service = _service(request)
     key = require_pool_key(request, service.store)
     payload = await _json_body(request)
+    session_id = _session_id(request, payload)
     if payload.get("stream"):
         try:
             (
@@ -155,21 +190,32 @@ async def responses(request: Request):
                 headers,
                 started,
                 key_info,
-            ) = await service.gateway.open_stream(payload, key, endpoint="responses")
+            ) = await service.gateway.open_stream(
+                payload, key, endpoint="responses", session_id=session_id
+            )
         except (PoolError, PoolHTTPError) as exc:
             return _error_response(exc)
         except Exception as exc:  # noqa: BLE001
             return _error_response(exc)
         return StreamingResponse(
             service.gateway.stream_body(
-                response, attempt, request_id, attempt_no, key_info, started
+                response,
+                attempt,
+                request_id,
+                attempt_no,
+                key_info,
+                started,
+                session_id=session_id,
+                bind_session=_bind_session_for(payload.get("model")),
             ),
             media_type="text/event-stream",
             headers=headers,
         )
 
     try:
-        status, body, headers = await service.gateway.chat(payload, key, endpoint="responses")
+        status, body, headers = await service.gateway.chat(
+            payload, key, endpoint="responses", session_id=session_id
+        )
     except (PoolError, PoolHTTPError) as exc:
         return _error_response(exc)
     except Exception as exc:  # noqa: BLE001
@@ -196,6 +242,7 @@ async def messages(request: Request):
 
     openai_payload = to_openai_request(payload)
     request_model = str(payload.get("model") or "auto")
+    session_id = _session_id(request, payload)
 
     if payload.get("stream"):
         try:
@@ -207,7 +254,9 @@ async def messages(request: Request):
                 headers,
                 started,
                 key_info,
-            ) = await service.gateway.open_stream(openai_payload, key, endpoint="chat")
+            ) = await service.gateway.open_stream(
+                openai_payload, key, endpoint="chat", session_id=session_id
+            )
         except (PoolError, PoolHTTPError) as exc:
             return JSONResponse(
                 status_code=exc.status_code,
@@ -219,7 +268,14 @@ async def messages(request: Request):
                 content=anthropic_error(502, str(exc)),
             )
         raw_stream = service.gateway.stream_body(
-            response, attempt, request_id, attempt_no, key_info, started
+            response,
+            attempt,
+            request_id,
+            attempt_no,
+            key_info,
+            started,
+            session_id=session_id,
+            bind_session=_bind_session_for(openai_payload.get("model")),
         )
         return StreamingResponse(
             translate_stream(raw_stream, request_model),
@@ -229,7 +285,7 @@ async def messages(request: Request):
 
     try:
         status, body, headers = await service.gateway.chat(
-            openai_payload, key, endpoint="chat"
+            openai_payload, key, endpoint="chat", session_id=session_id
         )
     except (PoolError, PoolHTTPError) as exc:
         return JSONResponse(

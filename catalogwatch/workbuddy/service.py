@@ -130,7 +130,8 @@ class WorkBuddyService:
             log.exception("workbuddy ledger reconciliation failed")
         try:
             if now - last["sessions"] >= 3600:
-                store.cleanup_sessions(utcnow_iso())
+                store.cleanup_admin_sessions(utcnow_iso())
+                store.cleanup_pool_sessions(utcnow_iso())
                 last["sessions"] = now
         except Exception:  # noqa: BLE001
             log.exception("workbuddy session cleanup failed")
@@ -171,6 +172,7 @@ class WorkBuddyService:
             "available_credits": round(total_available, 4),
             "free_models": len(free_models),
             "models": len(self.catalog.list_costs()),
+            "sessions": len(self.store.list_sessions(limit=1000)),
             "cooldowns": cooldowns,
             "cost_summary": cost_summary(free_models),
             "updated_at": utcnow_iso(),

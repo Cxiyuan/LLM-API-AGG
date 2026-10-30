@@ -129,7 +129,7 @@ def test_pool_key_and_chat_ledger(tmp_path, monkeypatch):
 
         response = client.post(
             "/v1/chat/completions",
-            headers=auth,
+            headers={**auth, "X-Session-ID": "session-1"},
             json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
         )
         assert response.status_code == 200
@@ -139,6 +139,10 @@ def test_pool_key_and_chat_ledger(tmp_path, monkeypatch):
         assert fake.last_payload["model"] == "workbuddy/free-model"
         assert fake.last_headers["X-WorkBuddy-Account"] == "1"
         assert fake.last_headers["X-WorkBuddy-Account-Mode"] == "strict"
+        binding = service.store.get_session("session-1")
+        assert binding is not None
+        assert binding["model_id"] == "free-model"
+        assert binding["account_id"] == 1
 
         requests = service.store.list_requests()
         assert requests and requests[0]["model_routed"] == "free-model"

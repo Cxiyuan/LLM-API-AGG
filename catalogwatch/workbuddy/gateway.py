@@ -17,7 +17,7 @@ import httpx
 
 from ..util import utcnow_iso
 from .bridge import BridgeError, BuddyBridge
-from .router import Attempt, PoolError, PoolIntent, PoolRouter, extract_intent
+from .router import ALIASES, Attempt, PoolError, PoolIntent, PoolRouter, extract_intent
 from .store import WorkBuddyStore
 
 
@@ -146,9 +146,19 @@ class PoolGateway:
         if not self.store.reserve_key_request(int(key_id), day, limit):
             raise PoolHTTPError(429, "key_rate_limited", "Pool key daily request limit exceeded")
 
-    def _start(self, request_id: str, key: dict, endpoint: str, intent: PoolIntent, attempts: list[Attempt]) -> None:
+    def _start(
+        self,
+        request_id: str,
+        key: dict,
+        endpoint: str,
+        intent: PoolIntent,
+        attempts: list[Attempt],
+        *,
+        session_id: str | None = None,
+    ) -> None:
         self.store.start_request(
             request_id=request_id,
+            session_id=session_id,
             pool_key_id=key.get("id"),
             endpoint=endpoint,
             model_requested=intent.model,
@@ -196,7 +206,19 @@ class PoolGateway:
         usage: dict,
         status_code: int,
         latency_ms: int,
+        session_id: str | None = None,
+        bind_session: bool = False,
     ) -> None:
+        account_id = int(attempt.account["account_id"])
+        self.router.load.exit(attempt.provider, attempt.model_id, account_id)
+        self.router.load.record(
+            attempt.provider,
+            attempt.model_id,
+            account_id,
+            success=True,
+            status_code=status_code,
+            latency_ms=latency_ms,
+        )
         prompt = int(usage.get("prompt_tokens") or 0)
         completion = int(usage.get("completion_tokens") or 0)
         total = int(usage.get("total_tokens") or (prompt + completion))
@@ -243,6 +265,18 @@ class PoolGateway:
             credits=credit_value,
         )
         self.store.note_success(int(attempt.account["account_id"]))
+        if session_id and bind_session:
+            try:
+                ttl = int(self.router.policy().get("session_ttl_seconds") or 1800)
+            except (TypeError, ValueError):
+                ttl = 1800
+            self.store.upsert_session(
+                session_id,
+                provider=attempt.provider,
+                model_id=attempt.model_id,
+                account_id=account_id,
+                ttl_seconds=ttl,
+            )
 
     def _failure(
         self,
@@ -256,6 +290,15 @@ class PoolGateway:
         latency_ms: int,
     ) -> None:
         account_id = int(attempt.account["account_id"])
+        self.router.load.exit(attempt.provider, attempt.model_id, account_id)
+        self.router.load.record(
+            attempt.provider,
+            attempt.model_id,
+            account_id,
+            success=False,
+            status_code=status_code,
+            latency_ms=latency_ms,
+        )
         self.store.record_attempt(
             request_id=request_id,
             attempt_no=attempt_no,
@@ -290,19 +333,32 @@ class PoolGateway:
     # ------------------------------------------------------------------ non-stream
 
     async def chat(
-        self, payload: dict, key: dict, *, endpoint: str = "chat"
+        self,
+        payload: dict,
+        key: dict,
+        *,
+        endpoint: str = "chat",
+        session_id: str | None = None,
     ) -> tuple[int, dict, dict[str, str]]:
         intent = extract_intent(payload)
-        attempts = self.router.plan(intent, key)
+        attempts = self.router.plan(intent, key, session_id=session_id)
         self._reserve(key)
         request_id = "wb-" + secrets.token_hex(12)
-        self._start(request_id, key, endpoint, intent, attempts)
+        self._start(
+            request_id, key, endpoint, intent, attempts, session_id=session_id
+        )
+        bind_session = bool(session_id and intent.model in ALIASES)
         last_error: BridgeError | None = None
 
         for attempt_no, attempt in enumerate(attempts, start=1):
             body = dict(payload)
             body["model"] = attempt.wire_id
             headers = self._attempt_headers(attempt, request_id, attempt_no)
+            self.router.load.enter(
+                attempt.provider,
+                attempt.model_id,
+                int(attempt.account["account_id"]),
+            )
             started = time.monotonic()
             try:
                 if endpoint == "responses":
@@ -364,6 +420,8 @@ class PoolGateway:
                 usage=usage,
                 status_code=response.status_code,
                 latency_ms=latency,
+                session_id=session_id,
+                bind_session=bind_session,
             )
             headers_out = self._response_headers(
                 attempt, request_id, attempt_no, str(attempt.cost.get("cost_source") or "unknown")
@@ -376,19 +434,31 @@ class PoolGateway:
     # --------------------------------------------------------------------- stream
 
     async def open_stream(
-        self, payload: dict, key: dict, *, endpoint: str = "chat"
+        self,
+        payload: dict,
+        key: dict,
+        *,
+        endpoint: str = "chat",
+        session_id: str | None = None,
     ) -> tuple[httpx.Response, Attempt, str, int, dict[str, str], int, dict]:
         intent = extract_intent(payload)
-        attempts = self.router.plan(intent, key)
+        attempts = self.router.plan(intent, key, session_id=session_id)
         self._reserve(key)
         request_id = "wb-" + secrets.token_hex(12)
-        self._start(request_id, key, endpoint, intent, attempts)
+        self._start(
+            request_id, key, endpoint, intent, attempts, session_id=session_id
+        )
         last_error: BridgeError | None = None
 
         for attempt_no, attempt in enumerate(attempts, start=1):
             body = dict(payload)
             body["model"] = attempt.wire_id
             headers = self._attempt_headers(attempt, request_id, attempt_no)
+            self.router.load.enter(
+                attempt.provider,
+                attempt.model_id,
+                int(attempt.account["account_id"]),
+            )
             started = time.monotonic()
             try:
                 if endpoint == "responses":
@@ -459,6 +529,9 @@ class PoolGateway:
         attempt_no: int,
         key: dict,
         started: float,
+        *,
+        session_id: str | None = None,
+        bind_session: bool = False,
     ) -> AsyncIterator[bytes]:
         buffer = b""
         last_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "credit": None, "finish_reason": None}
@@ -493,6 +566,8 @@ class PoolGateway:
                 usage=last_usage,
                 status_code=response.status_code,
                 latency_ms=latency,
+                session_id=session_id,
+                bind_session=bind_session,
             )
         except httpx.HTTPError as exc:
             latency = int((time.monotonic() - started) * 1000)

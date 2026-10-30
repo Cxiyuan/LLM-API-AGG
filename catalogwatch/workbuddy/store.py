@@ -878,6 +878,81 @@ class WorkBuddyStore:
         ).fetchone()
         return dict(row) if row else {"requests": 0, "tokens": 0, "credits": 0}
 
+    # ------------------------------------------------------------------- sessions
+
+    def get_session(self, session_id: str) -> dict | None:
+        if not session_id:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM pool_sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        now = utcnow_iso()
+        if str(row["expires_at"] or "") <= now:
+            self.delete_session(session_id)
+            return None
+        return dict(row)
+
+    def upsert_session(
+        self,
+        session_id: str,
+        *,
+        provider: str,
+        model_id: str,
+        account_id: int | None,
+        ttl_seconds: int = 1800,
+    ) -> None:
+        if not session_id:
+            return
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=max(60, int(ttl_seconds)))
+        with self.lock, self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO pool_sessions (
+                    session_id, provider, model_id, account_id,
+                    created_at, last_used_at, expires_at, request_count
+                ) VALUES (?,?,?,?,?,?,?,1)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    provider=excluded.provider,
+                    model_id=excluded.model_id,
+                    account_id=excluded.account_id,
+                    last_used_at=excluded.last_used_at,
+                    expires_at=excluded.expires_at,
+                    request_count=pool_sessions.request_count + 1
+                """,
+                (
+                    session_id,
+                    provider,
+                    model_id,
+                    int(account_id) if account_id is not None else None,
+                    now.isoformat(timespec="seconds"),
+                    now.isoformat(timespec="seconds"),
+                    expires.isoformat(timespec="seconds"),
+                ),
+            )
+
+    def delete_session(self, session_id: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "DELETE FROM pool_sessions WHERE session_id=?", (session_id,)
+            )
+
+    def cleanup_pool_sessions(self, before: str | None = None) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "DELETE FROM pool_sessions WHERE expires_at <= ?",
+                (before or utcnow_iso(),),
+            )
+
+    def list_sessions(self, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM pool_sessions ORDER BY last_used_at DESC LIMIT ?",
+            (max(1, min(500, int(limit))),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     # --------------------------------------------------------------- pool request
 
     def start_request(
@@ -890,17 +965,19 @@ class WorkBuddyStore:
         stream: bool,
         intent: Any,
         routing: Any,
+        session_id: str | None = None,
     ) -> None:
         with self.lock, self.conn:
             self.conn.execute(
                 """
                 INSERT INTO pool_requests (
-                    request_id, pool_key_id, endpoint, model_requested,
+                    request_id, session_id, pool_key_id, endpoint, model_requested,
                     intent_json, stream, routing_json, created_at
-                ) VALUES (?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     request_id,
+                    session_id,
                     pool_key_id,
                     endpoint,
                     model_requested,
@@ -1167,30 +1244,32 @@ class WorkBuddyStore:
 
     # ------------------------------------------------------------------- sessions
 
-    def create_session(self, id_hash: str, expires_at: str, user_agent: str | None) -> None:
+    def create_admin_session(
+        self, id_hash: str, expires_at: str, user_agent: str | None
+    ) -> None:
         with self.lock, self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO admin_sessions (id_hash, created_at, expires_at, last_seen_at, user_agent) VALUES (?,?,?,?,?)",
                 (id_hash, utcnow_iso(), expires_at, utcnow_iso(), user_agent),
             )
 
-    def get_session(self, id_hash: str) -> dict | None:
+    def get_admin_session(self, id_hash: str) -> dict | None:
         row = self.conn.execute(
             "SELECT * FROM admin_sessions WHERE id_hash=?", (id_hash,)
         ).fetchone()
         return dict(row) if row else None
 
-    def touch_session(self, id_hash: str) -> None:
+    def touch_admin_session(self, id_hash: str) -> None:
         with self.lock, self.conn:
             self.conn.execute(
                 "UPDATE admin_sessions SET last_seen_at=? WHERE id_hash=?",
                 (utcnow_iso(), id_hash),
             )
 
-    def delete_session(self, id_hash: str) -> None:
+    def delete_admin_session(self, id_hash: str) -> None:
         with self.lock, self.conn:
             self.conn.execute("DELETE FROM admin_sessions WHERE id_hash=?", (id_hash,))
 
-    def cleanup_sessions(self, before: str) -> None:
+    def cleanup_admin_sessions(self, before: str) -> None:
         with self.lock, self.conn:
             self.conn.execute("DELETE FROM admin_sessions WHERE expires_at < ?", (before,))

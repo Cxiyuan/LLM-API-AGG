@@ -223,6 +223,18 @@ CREATE TABLE IF NOT EXISTS credit_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_credit_snapshots_account ON credit_snapshots(account_id, id DESC);
 
+CREATE TABLE IF NOT EXISTS pool_sessions (
+    session_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    account_id INTEGER,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pool_sessions_expiry ON pool_sessions(expires_at);
+
 CREATE TABLE IF NOT EXISTS pool_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -253,6 +265,7 @@ CREATE TABLE IF NOT EXISTS pool_key_daily_usage (
 CREATE TABLE IF NOT EXISTS pool_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     request_id TEXT NOT NULL UNIQUE,
+    session_id TEXT,
     pool_key_id INTEGER,
     endpoint TEXT,
     model_requested TEXT,
@@ -448,6 +461,11 @@ class Database:
         }
         if "fields_json" not in source_columns:
             self.conn.execute("ALTER TABLE quota_sources ADD COLUMN fields_json TEXT")
+        pool_request_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(pool_requests)")
+        }
+        if pool_request_columns and "session_id" not in pool_request_columns:
+            self.conn.execute("ALTER TABLE pool_requests ADD COLUMN session_id TEXT")
 
     def close(self) -> None:
         self.conn.close()

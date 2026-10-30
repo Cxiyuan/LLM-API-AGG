@@ -101,7 +101,7 @@ def create_admin_session(
     session_id = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(24)
     expires = _expires_at()
-    store.create_session(_hash_session(session_id), expires, user_agent)
+    store.create_admin_session(_hash_session(session_id), expires, user_agent)
     return session_id, csrf, expires
 
 
@@ -167,11 +167,11 @@ def require_admin(
 
     session_id = request.cookies.get(ADMIN_COOKIE, "")
     if session_id:
-        session = store.get_session(_hash_session(session_id))
+        session = store.get_admin_session(_hash_session(session_id))
         if session and not _expired(session.get("expires_at")):
             if mutation and not (_same_origin(request) and _csrf_ok(request)):
                 raise HTTPException(status_code=403, detail="CSRF/origin check failed")
-            store.touch_session(session["id_hash"])
+            store.touch_admin_session(session["id_hash"])
             return "session"
 
     raise HTTPException(status_code=401, detail="Admin authentication required")

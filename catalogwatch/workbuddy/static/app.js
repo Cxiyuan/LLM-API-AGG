@@ -151,7 +151,8 @@
             stat("账号", overview.accounts || 0),
             stat("可用积分", num(overview.available_credits)),
             stat("免费模型", overview.free_models || 0),
-            stat("模型总数", overview.models || 0)
+            stat("模型总数", overview.models || 0),
+            stat("活跃会话", overview.sessions || 0)
           ),
           warnings.length ? el("div", {}, ...warnings.map((item) => el("p", { class: "warn", text: item }))) : el("p", { class: "ok", text: "运行正常" })
         ),
@@ -497,6 +498,7 @@
     const data = await api("/api/requests?limit=200");
     const rows = (data.items || []).map((item) => [
       el("code", { text: item.request_id }),
+      fmt(item.session_id),
       fmt(item.created_at),
       fmt(item.model_requested) + " → " + fmt(item.model_routed),
       fmt(item.bridge_account_id),
@@ -516,7 +518,7 @@
         },
       }),
     ]);
-    setView(card("请求账本", table(["请求", "时间", "模型", "账号", "状态", "Tokens", "积分", "成本来源", "详情"], rows)));
+    setView(card("请求账本", table(["请求", "会话", "时间", "模型", "账号", "状态", "Tokens", "积分", "成本来源", "详情"], rows)));
   }
 
   // -------------------------------------------------------------------- policy
@@ -550,7 +552,13 @@
           make("max_model_candidates", "number", "最多候选模型"),
           make("free_429_threshold", "number", "免费 429 阈值"),
           make("unknown_cost", "text", "未知成本策略 after_known/allow/never"),
-          make("account_strategy", "text", "账号策略 expiring_first/richest_first/balance")
+          make("account_strategy", "text", "账号策略 expiring_first/richest_first/balance"),
+          make("routing_mode", "text", "路由模式 balanced/stable/cost"),
+          make("session_ttl_seconds", "number", "会话粘性 TTL（秒）"),
+          make("stability_weight", "number", "稳定性权重"),
+          make("load_weight", "number", "并发负载权重"),
+          make("cost_weight", "number", "成本权重"),
+          make("session_jitter", "number", "会话分布抖动")
         ),
         el("button", {
           class: "primary",

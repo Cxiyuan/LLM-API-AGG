@@ -10,6 +10,7 @@ from typing import Any
 
 from ..util import utcnow_iso
 from .catalog import WorkBuddyCatalog
+from .load import LoadTracker
 from .store import WorkBuddyStore
 
 ALIASES = {"auto", "free", "cheap"}
@@ -25,6 +26,12 @@ DEFAULT_POLICY: dict[str, Any] = {
     "max_model_candidates": 4,
     "free_429_threshold": 3,
     "unknown_cost": "after_known",
+    "routing_mode": "balanced",      # balanced | stable | cost
+    "stability_weight": 0.5,
+    "load_weight": 0.2,
+    "cost_weight": 0.2,
+    "session_jitter": 0.1,
+    "session_ttl_seconds": 1800,
     "model_priority": {},
     "allow_models": [],
     "deny_models": [],
@@ -132,9 +139,15 @@ def extract_intent(payload: dict) -> PoolIntent:
 
 
 class PoolRouter:
-    def __init__(self, store: WorkBuddyStore, catalog: WorkBuddyCatalog):
+    def __init__(
+        self,
+        store: WorkBuddyStore,
+        catalog: WorkBuddyCatalog,
+        load: LoadTracker | None = None,
+    ):
         self.store = store
         self.catalog = catalog
+        self.load = load or LoadTracker()
 
     def policy(self) -> dict:
         value = self.store.get_setting("policy", {})
@@ -211,7 +224,14 @@ class PoolRouter:
             for item in providers
         ]
 
-    def _rank_models(self, intent: PoolIntent, key: dict, policy: dict) -> list[dict]:
+    def _rank_models(
+        self,
+        intent: PoolIntent,
+        key: dict,
+        policy: dict,
+        *,
+        session_id: str | None = None,
+    ) -> list[dict]:
         if not self.store.list_accounts(present=True):
             raise PoolError(
                 "no_accounts",
@@ -283,11 +303,21 @@ class PoolRouter:
         priorities = policy.get("model_priority") or {}
         prefer_free = bool(policy.get("prefer_free", True))
         allow_night = bool(policy.get("allow_night", True))
+        routing_mode = str(policy.get("routing_mode") or "balanced")
+        stability_weight = float(policy.get("stability_weight") or 0.5)
+        load_weight = float(policy.get("load_weight") or 0.2)
+        cost_weight = float(policy.get("cost_weight") or 0.2)
+        jitter_weight = float(policy.get("session_jitter") or 0.1)
+        if routing_mode == "stable":
+            # Stability-first preset; use max_multiplier/free tier to bound cost.
+            stability_weight = max(stability_weight, 0.6)
+            cost_weight = 0.0
 
         def key_for(item: dict):
             credits = item.get("credits")
             effective = float(credits) if credits is not None else math.inf
-            free_rank = 0 if (item.get("free") and prefer_free) else 1
+            free_now = bool(item.get("free") and prefer_free)
+            tier = 0 if free_now else (1 if credits is not None else 2)
             night_rank = (
                 0
                 if (
@@ -309,13 +339,38 @@ class PoolRouter:
                 + min(1_000_000, int(item.get("context_length") or 0)) / 1_000_000
                 + priority
             )
+            if routing_mode == "cost":
+                return (
+                    tier,
+                    effective,
+                    night_rank,
+                    -quality,
+                    str(item.get("model_id")),
+                    str(item.get("provider")),
+                )
+
+            provider = str(item.get("provider"))
+            model_id = str(item.get("model_id"))
+            stability = self.load.stability(provider, model_id)
+            inflight = self.load.inflight(provider, model_id)
+            load_score = 1.0 / (1.0 + inflight)
+            cost_score = (
+                1.0 / (1.0 + max(0.0, effective)) if math.isfinite(effective) else 0.0
+            )
+            jitter = self.load.jitter(session_id, provider, model_id)
+            score = (
+                stability_weight * stability
+                + load_weight * load_score
+                + cost_weight * cost_score
+                + jitter_weight * jitter
+            )
             return (
-                free_rank,
-                effective,
+                tier,
+                -score,
                 night_rank,
                 -quality,
-                str(item.get("model_id")),
-                str(item.get("provider")),
+                model_id,
+                provider,
             )
 
         filtered.sort(key=key_for)
@@ -323,7 +378,12 @@ class PoolRouter:
         return filtered[:limit]
 
     def _accounts_for(
-        self, provider: str, cost: dict, policy: dict
+        self,
+        provider: str,
+        cost: dict,
+        policy: dict,
+        *,
+        preferred_account_id: int | None = None,
     ) -> list[tuple[dict, dict, int | None]]:
         day = utcnow_iso()[:10]
         model_id = str(cost["model_id"])
@@ -367,6 +427,16 @@ class PoolRouter:
                 continue
             result.append((account, state, int(request_cap) if request_cap > 0 else None))
 
+        def preferred_flag(account: dict) -> int:
+            if preferred_account_id is None:
+                return 1
+            return 0 if int(account["account_id"]) == int(preferred_account_id) else 1
+
+        def account_load(account: dict) -> int:
+            return self.load.account_inflight(
+                provider, model_id, int(account["account_id"])
+            )
+
         def free_key(entry):
             account, state, cap = entry
             used = self.store.account_model_usage_today(
@@ -375,6 +445,8 @@ class PoolRouter:
             headroom = (cap - int(used)) if cap else 10**9
             return (
                 -int(headroom),
+                preferred_flag(account),
+                account_load(account),
                 -int(account.get("priority") or 0),
                 -int(account.get("weight") or 1),
                 int(state.get("daily_requests") or 0),
@@ -395,15 +467,19 @@ class PoolRouter:
                 expiring = 0.0
             if strategy == "richest_first":
                 return (
+                    preferred_flag(account),
                     -available,
+                    account_load(account),
                     -int(account.get("priority") or 0),
                     -int(account.get("weight") or 1),
                     int(state.get("daily_requests") or 0),
                     int(account["account_id"]),
                 )
             return (
+                preferred_flag(account),
                 -expiring,
                 -available,
+                account_load(account),
                 -int(account.get("priority") or 0),
                 -int(account.get("weight") or 1),
                 int(state.get("daily_requests") or 0),
@@ -413,11 +489,77 @@ class PoolRouter:
         result.sort(key=free_key if free else paid_key)
         return result
 
-    def plan(self, intent: PoolIntent, key: dict) -> list[Attempt]:
+    def _bound_cost(
+        self,
+        binding: dict,
+        intent: PoolIntent,
+        key: dict,
+        policy: dict,
+    ) -> dict | None:
+        provider = str(binding.get("provider") or "")
+        model_id = str(binding.get("model_id") or "")
+        if not provider or not model_id:
+            return None
+        cost = self.catalog.effective_cost(provider, model_id)
+        if cost is None or not cost.get("present", True):
+            return None
+        if not self._capable(cost, intent):
+            return None
+        if not self._model_allowed(model_id, f"{provider}/{model_id}", key, policy):
+            return None
+        credits = cost.get("credits")
+        max_multiplier = float(policy.get("max_multiplier") or 0)
+        if (
+            max_multiplier > 0
+            and credits is not None
+            and float(credits) > max_multiplier
+            and not policy.get("allow_over_max")
+        ):
+            return None
+        if credits is None and str(policy.get("unknown_cost") or "after_known") == "never":
+            return None
+        return cost
+
+    def plan(
+        self, intent: PoolIntent, key: dict, *, session_id: str | None = None
+    ) -> list[Attempt]:
         policy = self.policy()
         if key.get("max_attempts"):
             policy["max_attempts"] = key["max_attempts"]
-        models = self._rank_models(intent, key, policy)
+
+        binding = None
+        if session_id and intent.model in ALIASES:
+            binding = self.store.get_session(session_id)
+
+        models = self._rank_models(
+            intent, key, policy, session_id=session_id
+        )
+        preferred_account_id: int | None = None
+        if binding:
+            bound = self._bound_cost(binding, intent, key, policy)
+            if bound is not None:
+                models = [
+                    bound,
+                    *[
+                        item
+                        for item in models
+                        if not (
+                            item.get("provider") == bound.get("provider")
+                            and item.get("model_id") == bound.get("model_id")
+                        )
+                    ],
+                ]
+                try:
+                    preferred_account_id = (
+                        int(binding.get("account_id"))
+                        if binding.get("account_id") is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    preferred_account_id = None
+            else:
+                self.store.delete_session(session_id)
+
         max_attempts = max(1, min(5, int(policy.get("max_attempts") or 3)))
         used_accounts: set[int] = set()
         attempts: list[Attempt] = []
@@ -426,7 +568,12 @@ class PoolRouter:
             provider = str(cost.get("provider"))
             model_id = str(cost.get("model_id"))
             wire_id = f"{provider}/{model_id}"
-            accounts = self._accounts_for(provider, cost, policy)
+            accounts = self._accounts_for(
+                provider,
+                cost,
+                policy,
+                preferred_account_id=preferred_account_id,
+            )
             if not accounts:
                 continue
             for account, state, _cap in accounts:
@@ -447,12 +594,28 @@ class PoolRouter:
                     )
                 )
                 if len(attempts) >= max_attempts:
-                    return attempts
+                    break
+            if len(attempts) >= max_attempts:
+                break
 
         if not attempts:
             raise PoolError(
                 "no_accounts",
                 "No WorkBuddy account can serve this request (login, credits, cooldown, or caps)",
                 503,
+            )
+
+        if session_id and intent.model in ALIASES:
+            first = attempts[0]
+            try:
+                ttl = int(policy.get("session_ttl_seconds") or 1800)
+            except (TypeError, ValueError):
+                ttl = 1800
+            self.store.upsert_session(
+                session_id,
+                provider=first.provider,
+                model_id=first.model_id,
+                account_id=int(first.account["account_id"]),
+                ttl_seconds=ttl,
             )
         return attempts

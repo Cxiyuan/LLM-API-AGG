@@ -84,7 +84,7 @@ async def logout(request: Request) -> JSONResponse:
     if session_id:
         from .auth import _hash_session
 
-        service.store.delete_session(_hash_session(session_id))
+        service.store.delete_admin_session(_hash_session(session_id))
     response = JSONResponse({"ok": True})
     clear_session_cookies(response)
     return response
@@ -524,6 +524,11 @@ async def update_policy(request: Request) -> dict:
     for key, value in body.items():
         if key in DEFAULT_POLICY:
             merged[key] = value
+    if str(merged.get("routing_mode") or "balanced") not in {"balanced", "stable", "cost"}:
+        raise HTTPException(
+            status_code=400,
+            detail="routing_mode must be balanced, stable, or cost",
+        )
     service.store.set_setting("policy", merged)
     _audit(service, actor, "policy.update", None, merged)
     return {"ok": True, "policy": merged}
