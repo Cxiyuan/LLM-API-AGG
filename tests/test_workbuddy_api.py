@@ -31,7 +31,8 @@ def test_console_auth_and_empty_accounts(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("BUDDY2API_URL", "http://127.0.0.1:1")
 
-    with TestClient(create_app(_settings(tmp_path))) as client:
+    app = create_app(_settings(tmp_path))
+    with TestClient(app) as client:
         assert client.get("/").status_code == 200
         assert "LLM-API-AGG" in client.get("/").text
 
@@ -57,6 +58,15 @@ def test_console_auth_and_empty_accounts(tmp_path, monkeypatch):
         overview = client.get("/api/overview")
         assert overview.status_code == 200
         assert overview.json()["ok"] is True
+
+        # Buddy2api /health answers {"status":"ok"}; the console's `ok` flag is
+        # normalized so it does not report a healthy bridge as unreachable.
+        async def healthy():
+            return {"status": "ok", "version": "test"}
+
+        app.state.workbuddy.bridge.health = healthy
+        normalized = client.get("/api/overview")
+        assert normalized.json()["bridge"]["ok"] is True
 
         # Cookie-authenticated mutations require the double-submit CSRF token.
         no_csrf = client.post("/api/workbuddy/catalog/refresh")

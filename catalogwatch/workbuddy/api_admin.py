@@ -106,6 +106,12 @@ async def overview(request: Request) -> dict:
     bridge: dict = {"ok": False}
     try:
         bridge = await service.bridge.health()
+        # Buddy2api's /health reports {"status": "ok", ...}; normalize the flag
+        # so clients that look for `ok` do not show a false "unreachable".
+        if isinstance(bridge, dict):
+            bridge.setdefault(
+                "ok", str(bridge.get("status") or "").strip().lower() == "ok"
+            )
     except Exception as exc:  # noqa: BLE001 - health is best effort
         bridge = {"ok": False, "error": str(exc)[:300]}
     return {

@@ -142,7 +142,9 @@
     const snapshot = data.config_snapshot || {};
     const summary = resources.summary || {};
     const warnings = [];
-    if (!bridge.ok) warnings.push("Buddy2api 不可达：" + (bridge.error || "unknown"));
+    // /health historically answered {"status":"ok"}; accept both shapes.
+    const bridgeHealthy = bridge.ok === true || String(bridge.status || "").toLowerCase() === "ok";
+    if (!bridgeHealthy) warnings.push("Buddy2api 不可达：" + (bridge.error || "unknown"));
     if (snapshot.warning) warnings.push("WorkBuddy 目录警告：" + snapshot.warning);
     if (overview.cooldowns && overview.cooldowns.length) warnings.push("有 " + overview.cooldowns.length + " 个账号处于冷却/额度耗尽状态");
     if (!summary.callable) warnings.push("当前没有可调用模型：登录 WorkBuddy 账号，或给免费厂商配置 API Key");
