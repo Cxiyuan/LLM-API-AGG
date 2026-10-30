@@ -106,6 +106,7 @@ jobs:
           if [ "$ready" != "1" ]; then
             echo "container did not become healthy" >&2
             docker logs free-llm-smoke || true
+            docker exec free-llm-smoke sh -c 'cat /tmp/*.log /tmp/*.err 2>/dev/null' || true
             exit 1
           fi
 

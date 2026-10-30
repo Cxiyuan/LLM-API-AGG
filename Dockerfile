@@ -33,7 +33,7 @@ RUN python -m venv /opt/venv
 WORKDIR /app
 
 # CatalogWatch first, then the bridge's pinned dependency set.
-COPY pyproject.toml README.md ./
+COPY pyproject.toml ./
 COPY catalogwatch ./catalogwatch
 COPY config ./config
 RUN pip install --upgrade pip && pip install .

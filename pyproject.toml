@@ -2,7 +2,6 @@
 name = "catalogwatch"
 version = "0.1.0"
 description = "Near-real-time catalog of free LLM models and provider quota pages"
-readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12.3",
