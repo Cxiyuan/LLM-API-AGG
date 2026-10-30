@@ -11,6 +11,7 @@ from typing import Any
 from ..util import utcnow_iso
 from .catalog import WorkBuddyCatalog
 from .load import LoadTracker
+from .model_filter import is_text_chat_model
 from .store import WorkBuddyStore
 
 ALIASES = {"auto", "free", "cheap"}
@@ -194,6 +195,15 @@ class PoolRouter:
         elif requested.startswith("workbuddy/"):
             provider = "workbuddy"
             model_id = requested[len("workbuddy/") :]
+
+        # 显式点名伪模型/视频/音频/图像模型时直接拒绝：池不代理非文本能力，
+        # 交给上游也只会得到一个难懂的协议错误。
+        if not is_text_chat_model(model_id):
+            raise PoolError(
+                "model_not_text",
+                f"Model '{requested}' is not a text chat model; the pool only serves text models",
+                400,
+            )
 
         matches = [
             item

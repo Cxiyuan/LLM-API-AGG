@@ -330,7 +330,7 @@
           data.config_snapshot && data.config_snapshot.warning
             ? el("p", { class: "warn", text: "目录警告：" + data.config_snapshot.warning })
             : null,
-          el("p", { class: "muted", text: "免费/低倍率按当前时间重算；夜间窗口使用促销自带的时区。" }),
+          el("p", { class: "muted", text: "免费/低倍率按当前时间重算；夜间窗口使用促销自带的时区。已过滤 auto/default 等伪模型，以及视频、音频、图像生成等非文本模型。" }),
           table(["模型", "基础倍率", "当前倍率", "状态", "促销", "截止", "上下文", "来源", "操作"], rows)
         )
       )

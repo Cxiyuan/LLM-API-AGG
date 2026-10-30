@@ -157,7 +157,10 @@ class WorkBuddyService:
         total_available = sum(
             float(a.get("available_credits") or 0) for a in accounts
         )
-        free_models = [item for item in self.catalog.list_costs() if item.get("free")]
+        # 一次取全量成本，供「模型数 / 免费数 / 成本概览」共用；概览以前只把
+        # 免费子集传给 cost_summary，导致 total 显示成免费数。
+        costs = self.catalog.list_costs()
+        free_models = [item for item in costs if item.get("free")]
         cooldowns = [
             {
                 "account_id": account_id,
@@ -171,9 +174,9 @@ class WorkBuddyService:
             "accounts": len(accounts),
             "available_credits": round(total_available, 4),
             "free_models": len(free_models),
-            "models": len(self.catalog.list_costs()),
+            "models": len(costs),
             "sessions": len(self.store.list_sessions(limit=1000)),
             "cooldowns": cooldowns,
-            "cost_summary": cost_summary(free_models),
+            "cost_summary": cost_summary(costs),
             "updated_at": utcnow_iso(),
         }

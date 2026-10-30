@@ -67,3 +67,57 @@ def test_effective_cost_day_night_and_manual_override(tmp_path):
     costs = catalog.list_costs("workbuddy")
     assert len(costs) == 1 and costs[0]["model_id"] == "glm-5.2"
     db.close()
+
+
+class _FakeCatalogBridge:
+    """Just enough of BuddyBridge for one catalog refresh."""
+
+    def __init__(self, entries: list[dict]):
+        self.entries = entries
+
+    async def refresh_models(self) -> dict:
+        return {}
+
+    async def models(self) -> dict:
+        return {"data": self.entries}
+
+    async def workbuddy_config(
+        self, provider: str = "workbuddy", identity: str = "current", force: bool = False
+    ) -> dict:
+        return {
+            "models": [],
+            "promotions_available": False,
+            "identity_used": identity,
+            "account_id": None,
+        }
+
+
+async def test_refresh_filters_pseudo_and_media_models(tmp_path):
+    """目录刷新后：auto/default、视频/音频/图像模型不入库、不出现、不路由。"""
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    # 模拟旧版本已经存过一条媒体模型：刷新后必须变 present=0 并立刻从视图消失
+    store.upsert_models(
+        "workbuddy",
+        [{"id": "kling-video-v3", "name": "Kling-Video-V3"}],
+    )
+    bridge = _FakeCatalogBridge([
+        {"id": "auto", "channel": "workbuddy", "name": "auto"},
+        {"id": "default", "channel": "workbuddy", "name": "Default"},
+        {"id": "deepseek-v4-flash", "channel": "workbuddy", "name": "Deepseek-V4-Flash", "credits": 0.17},
+        {"id": "glm-4.6v", "channel": "workbuddy", "name": "GLM-4.6V", "credits": 0.11},
+        {"id": "kling-video-v3", "channel": "workbuddy", "name": "Kling-Video-V3"},
+        {"id": "minimax-video-h3", "channel": "workbuddy", "name": "MiniMax-H3"},
+        {"id": "hunyuan-image-alpha-edit", "channel": "workbuddy", "name": "Hunyuan Image Alpha Edit"},
+    ])
+    catalog = WorkBuddyCatalog(store, bridge, providers=("workbuddy",))
+    result = await catalog.refresh()
+
+    kept = [item["model_id"] for item in store.list_models("workbuddy")]
+    assert kept == ["deepseek-v4-flash", "glm-4.6v"]
+    assert [item["model_id"] for item in catalog.list_costs()] == kept
+    assert result[0]["models"] == 2
+    assert result[0]["filtered"] == 5
+    # 旧行即使还在库里，也不能再被查询/绑定
+    assert catalog.effective_cost("workbuddy", "kling-video-v3") is None
+    db.close()

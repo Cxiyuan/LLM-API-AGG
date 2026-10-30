@@ -16,6 +16,7 @@ from typing import Any
 
 from ..util import utcnow_iso
 from .bridge import BridgeError, BuddyBridge
+from .model_filter import is_text_chat_model
 from .promotions import (
     DEFAULT_TIMEZONE,
     apply_promotion,
@@ -130,6 +131,16 @@ class WorkBuddyCatalog:
                         if key in extra:
                             item[key] = extra[key]
                 merged.append(item)
+            # 池只服务文本对话：先把伪模型（auto/default）和视频/音频/图像等
+            # 非文本模型剔掉。upsert_models 会把不在列表里的旧行标成 present=0，
+            # 所以之前展示过的媒体模型下一次刷新就消失。
+            served_count = len(merged)
+            merged = [
+                item
+                for item in merged
+                if is_text_chat_model(item.get("id"), item.get("name"))
+            ]
+            filtered_out = served_count - len(merged)
             self.store.upsert_models(provider, merged, source_identity=identity)
 
             if config and config.get("promotions_available"):
@@ -157,6 +168,7 @@ class WorkBuddyCatalog:
                 "provider": provider,
                 "ok": True,
                 "models": len(merged),
+                "filtered": filtered_out,
                 "promotions": promotion_count,
                 "warning": warning,
                 "served_error": served_error,
@@ -193,6 +205,10 @@ class WorkBuddyCatalog:
     ) -> dict | None:
         model = self.store.get_model(provider, model_id)
         if model is None:
+            return None
+        # 防御：旧行或手动成本里可能还有伪模型/媒体模型。即使上游还没刷新，
+        # 也不让它进列表、更不让会话绑到它上面。
+        if not is_text_chat_model(model.get("model_id"), model.get("name")):
             return None
         base = parse_credits(model.get("base_credits"))
         promotions = self.store.get_promotions(provider, model_id)
