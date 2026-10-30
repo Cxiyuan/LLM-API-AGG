@@ -211,6 +211,12 @@ class PoolRouter:
         ]
 
     def _rank_models(self, intent: PoolIntent, key: dict, policy: dict) -> list[dict]:
+        if not self.store.list_accounts(present=True):
+            raise PoolError(
+                "no_accounts",
+                "No WorkBuddy account is logged in to the pool",
+                503,
+            )
         costs = [item for item in self.catalog.list_costs() if item.get("present", True)]
         if not costs:
             raise PoolError("no_models", "No WorkBuddy models are available yet", 503)
@@ -343,6 +349,12 @@ class PoolRouter:
             if request_cap > 0 and (
                 int(usage.get("requests") or 0) >= request_cap
                 or int(account_usage.get("requests") or 0) >= request_cap
+            ):
+                continue
+            credit_cap = float(caps.get("daily_credit_cap") or 0)
+            if credit_cap > 0 and (
+                float(usage.get("credits") or 0) >= credit_cap
+                or float(account_usage.get("credits") or 0) >= credit_cap
             ):
                 continue
             available = account.get("available_credits")

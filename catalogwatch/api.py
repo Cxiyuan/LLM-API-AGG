@@ -14,8 +14,11 @@ from .config import Settings, load_settings
 from .service import CatalogService
 from .util import parse_since
 from .workbuddy.api_admin import router as admin_router
+from .workbuddy.api_pool import router as pool_router
 from .workbuddy.bridge import BridgeError
 from .workbuddy.dashboard import router as dashboard_router
+from .workbuddy.gateway import PoolHTTPError, error_body
+from .workbuddy.router import PoolError
 from .workbuddy.service import WorkBuddyService
 
 
@@ -63,13 +66,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _bridge_error_handler(request: Request, exc: BridgeError) -> JSONResponse:
         return JSONResponse(
             status_code=502,
-            content={
-                "error": {
-                    "message": str(exc)[:500],
-                    "type": "pool_error",
-                    "code": "bridge_error",
-                }
-            },
+            content=error_body("bridge_error", str(exc)[:500]),
+        )
+
+    @app.exception_handler(PoolError)
+    async def _pool_error_handler(request: Request, exc: PoolError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_body(exc.code, str(exc)[:500]),
+        )
+
+    @app.exception_handler(PoolHTTPError)
+    async def _pool_http_error_handler(request: Request, exc: PoolHTTPError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_body(exc.code, exc.message[:500]),
         )
 
     @app.get("/healthz")
@@ -184,6 +195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     app.include_router(admin_router)
+    app.include_router(pool_router)
     app.include_router(dashboard_router)
     static_dir = Path(__file__).parent / "workbuddy" / "static"
     if static_dir.is_dir():

@@ -128,6 +128,24 @@ jobs:
           curl -fsS -H "Authorization: Bearer $ADMIN" \
             http://127.0.0.1:18788/api/workbuddy/accounts
 
+          # Pool data plane: create a key, list models, and verify a clean
+          # no-account 503 (no crash) before any WorkBuddy login.
+          KEY_JSON="$(curl -fsS -H "Authorization: Bearer $ADMIN" \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"smoke","kind":"shared","daily_request_limit":0}' \
+            http://127.0.0.1:18788/api/keys)"
+          POOL_KEY="$(printf '%s' "$KEY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')"
+          test -n "$POOL_KEY"
+          curl -fsS -H "Authorization: Bearer $POOL_KEY" \
+            http://127.0.0.1:18788/v1/models | grep -q '"auto"'
+          CODE="$(curl -s -o /tmp/pool-chat.json -w '%{http_code}' \
+            -H "Authorization: Bearer $POOL_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"auto","messages":[{"role":"user","content":"hi"}]}' \
+            http://127.0.0.1:18788/v1/chat/completions)"
+          test "$CODE" = "503"
+          grep -q '"no_accounts"' /tmp/pool-chat.json
+
           # The bootstrap must have enabled the WorkBuddy provider in the
           # generated CatalogWatch config.
           docker exec free-llm-smoke /opt/venv/bin/python -c \

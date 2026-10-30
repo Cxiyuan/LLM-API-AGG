@@ -136,6 +136,12 @@ class PoolGateway:
         if not key_id:
             return
         day = utcnow_iso()[:10]
+        usage = self.store.key_usage_today(int(key_id), day)
+        credit_limit = float(key.get("daily_credit_limit") or 0)
+        if credit_limit > 0 and float(usage.get("credits") or 0) >= credit_limit:
+            raise PoolHTTPError(
+                429, "key_credit_limited", "Pool key daily credit limit exceeded"
+            )
         limit = int(key.get("daily_request_limit") or 0)
         if not self.store.reserve_key_request(int(key_id), day, limit):
             raise PoolHTTPError(429, "key_rate_limited", "Pool key daily request limit exceeded")

@@ -13,6 +13,8 @@ from ..util import utcnow_iso
 from .accounts import WorkBuddyAccounts
 from .bridge import BuddyBridge
 from .catalog import WorkBuddyCatalog, cost_summary
+from .gateway import PoolGateway
+from .router import PoolRouter
 from .store import WorkBuddyStore
 
 log = logging.getLogger(__name__)
@@ -38,6 +40,8 @@ class WorkBuddyService:
         )
         self.catalog = WorkBuddyCatalog(self.store, self.bridge)
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)
+        self.router = PoolRouter(self.store, self.catalog)
+        self.gateway = PoolGateway(self.store, self.router, self.bridge)
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock(self, key: str) -> asyncio.Lock:
