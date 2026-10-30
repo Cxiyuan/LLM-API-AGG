@@ -114,8 +114,9 @@ def test_poll_endpoint_reports_catalog_result(tmp_path, monkeypatch):
     async def fake_poll(provider_id: str, notify: bool = True):
         return PollResult(provider_id, "ok", model_count=3, free_model_count=2), []
 
-    app.state.service.poll_provider = fake_poll
     with TestClient(app) as client:
+        # The catalog service is created by the lifespan, inside this context.
+        app.state.service.poll_provider = fake_poll
         response = client.post("/api/providers/groq/poll", headers=admin)
         assert response.status_code == 200
         body = response.json()
