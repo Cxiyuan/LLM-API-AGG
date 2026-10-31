@@ -52,6 +52,11 @@ _REWRITES = (
         "You are an AI agent powered by DeepSeek Harness.",
         "You are an AI agent powered by DeepSeek's Harness.",
     ),
+    # The upstream channel check also matches the product name wherever it
+    # appears, not just in the harness preamble. Rewrite every remaining
+    # mention so an agent prompt that describes its harness is not rejected
+    # with 11128.
+    ("DeepSeek Harness", "the harness"),
     ("11128", "11-128"),
 )
 _NEEDLES = (
@@ -61,6 +66,7 @@ _NEEDLES = (
     "Main branch (",
     "You are a coding agent running in the Codex CLI",
     "You are an AI agent powered by DeepSeek Harness",
+    "DeepSeek Harness",
     "github.com/anthropics/",
     "OhMyOpenCode",
     "11128",
