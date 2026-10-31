@@ -13,7 +13,7 @@ from ..util import utcnow_iso
 from .catalog import WorkBuddyCatalog
 from .direct import BRIDGE_PROVIDERS, DirectSource
 from .load import LoadTracker
-from .model_filter import is_text_chat_model
+from .model_filter import is_text_chat_model, is_tool_capable_model
 from .store import WorkBuddyStore
 
 ALIASES = {"auto", "free", "cheap"}
@@ -224,6 +224,11 @@ class PoolRouter:
     @staticmethod
     def _capable(cost: dict, intent: PoolIntent) -> bool:
         caps = cost.get("capabilities") or {}
+        if intent.tools_required and not is_tool_capable_model(
+            cost.get("model_id"), cost.get("name")
+        ):
+            # Chat-capable but known to mangle tool names (diffusion models).
+            return False
         if intent.tools_required and caps.get("supportsToolCall") is False:
             return False
         if intent.vision_required and caps.get("supportsImages") is not True:

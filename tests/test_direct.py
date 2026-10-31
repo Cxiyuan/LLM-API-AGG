@@ -226,6 +226,29 @@ def test_router_uses_direct_sources_and_binds_sessions(tmp_path):
     assert explicit[0].model_id == "llama-3.3-70b-versatile"
 
 
+def test_router_keeps_diffusion_models_out_of_tool_requests(tmp_path):
+    settings = _settings(tmp_path)
+    db = Database(tmp_path / "direct.db")
+    store = WorkBuddyStore(db)
+    _catalog_row(db, "groq", "diffusiongemma-26b-a4b-it")
+    _catalog_row(db, "groq", "glm-5.3-flash")
+    router = PoolRouter(store, WorkBuddyCatalog(store, None), direct=DirectSource(settings, store))
+    tools = [{"type": "function", "function": {"name": "ping", "parameters": {}}}]
+
+    tool_plan = router.plan(
+        extract_intent({"model": "auto", "tools": tools, "messages": [{"role": "user", "content": "hi"}]}),
+        {},
+    )
+    assert tool_plan
+    assert all("diffusion" not in item.model_id for item in tool_plan)
+
+    plain_plan = router.plan(
+        extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        {},
+    )
+    assert any("diffusion" in item.model_id for item in plain_plan)
+
+
 def test_router_rejects_paid_and_non_text_explicit_models(tmp_path):
     settings = _settings(tmp_path)
     db = Database(tmp_path / "direct.db")

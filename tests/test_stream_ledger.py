@@ -9,7 +9,7 @@ import pytest
 
 from catalogwatch.db import Database
 from catalogwatch.workbuddy.catalog import WorkBuddyCatalog
-from catalogwatch.workbuddy.gateway import PoolGateway
+from catalogwatch.workbuddy.gateway import PoolGateway, _channel_rejected
 from catalogwatch.workbuddy.router import Attempt, PoolRouter
 from catalogwatch.workbuddy.store import WorkBuddyStore
 
@@ -80,6 +80,31 @@ async def test_stream_error_event_marks_request_failed(tmp_path):
         "SELECT status_code, error_code FROM pool_request_attempts WHERE request_id='r1'"
     ).fetchone()
     assert attempt["status_code"] == 502
+
+
+def test_channel_rejection_messages_are_retryable():
+    assert _channel_rejected("11128 upstream_channel rejected")
+    assert _channel_rejected("UPSTREAM_CHANNEL")
+    assert not _channel_rejected("rate limit exceeded")
+
+
+async def test_truncated_stream_is_not_a_success(tmp_path):
+    store, gateway = _setup(tmp_path)
+    response = _FakeStream([
+        b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+    ])
+    body = [
+        chunk
+        async for chunk in gateway.stream_body(
+            response, _attempt(), "r1", 1, {}, time.monotonic()
+        )
+    ]
+    assert body
+    row = store.conn.execute(
+        "SELECT status_code, error_code FROM pool_requests WHERE request_id='r1'"
+    ).fetchone()
+    assert row["status_code"] == 502
+    assert row["error_code"] == "stream_incomplete"
 
 
 async def test_client_cancellation_is_recorded_without_penalty(tmp_path):

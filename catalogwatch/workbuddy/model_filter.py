@@ -21,6 +21,11 @@ from __future__ import annotations
 PSEUDO_MODEL_IDS = frozenset({"auto", "default", "auto-model", "default-model"})
 PSEUDO_MODEL_NAMES = frozenset({"auto", "default", "auto model", "default model"})
 
+# Models that can chat but are unreliable at tool calling. `auto` must not pick
+# them for agent requests that carry tools (diffusion text models are the known
+# offender: they mangle MCP tool names).
+TOOL_UNSAFE_MARKERS = ("diffusion",)
+
 # Substrings of a non-text output modality, or of a non-chat endpoint.
 NON_TEXT_MARKERS = (
     # Video generation
@@ -54,3 +59,9 @@ def is_text_chat_model(model_id: object, name: object = None) -> bool:
         return False
     haystack = f"{ident} {_text(name)}"
     return not any(marker in haystack for marker in NON_TEXT_MARKERS)
+
+
+def is_tool_capable_model(model_id: object, name: object = None) -> bool:
+    """Whether `auto` may use this model for a tool-carrying request."""
+    haystack = f"{_text(model_id)} {_text(name)}"
+    return not any(marker in haystack for marker in TOOL_UNSAFE_MARKERS)

@@ -44,6 +44,15 @@ def _retryable(status: int) -> bool:
     return status in {0, 401, 403, 404, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
+_CHANNEL_REJECTION_MARKERS = ("upstream_channel", "11128")
+
+
+def _channel_rejected(message: str) -> bool:
+    """WorkBuddy rejects some prompts per channel; another source may accept it."""
+    text = str(message or "").lower()
+    return any(marker in text for marker in _CHANNEL_REJECTION_MARKERS)
+
+
 def _classify(status: int) -> str:
     if status in {401, 403}:
         return "auth_error"
@@ -465,6 +474,15 @@ class PoolGateway:
                 else:
                     response = await self.bridge.post_chat_with_headers(body, headers)
                 result = response.json()
+            except asyncio.CancelledError:
+                latency = int((time.monotonic() - started) * 1000)
+                self._canceled(
+                    attempt=attempt,
+                    request_id=request_id,
+                    attempt_no=attempt_no,
+                    latency_ms=latency,
+                )
+                raise
             except (BridgeError, DirectError) as exc:
                 last_error = exc
                 latency = int((time.monotonic() - started) * 1000)
@@ -478,7 +496,8 @@ class PoolGateway:
                     latency_ms=latency,
                     session_id=session_id,
                 )
-                if _retryable(exc.status_code) and attempt_no < len(attempts):
+                retry = _retryable(exc.status_code) or _channel_rejected(str(exc))
+                if retry and attempt_no < len(attempts):
                     continue
                 self.store.finish_request(
                     request_id,
@@ -574,6 +593,15 @@ class PoolGateway:
                     response = await self.bridge.open_responses_stream(body, headers)
                 else:
                     response = await self.bridge.open_chat_stream(body, headers)
+            except asyncio.CancelledError:
+                latency = int((time.monotonic() - started) * 1000)
+                self._canceled(
+                    attempt=attempt,
+                    request_id=request_id,
+                    attempt_no=attempt_no,
+                    latency_ms=latency,
+                )
+                raise
             except (BridgeError, DirectError) as exc:
                 last_error = exc
                 latency = int((time.monotonic() - started) * 1000)
@@ -587,7 +615,8 @@ class PoolGateway:
                     latency_ms=latency,
                     session_id=session_id,
                 )
-                if _retryable(exc.status_code) and attempt_no < len(attempts):
+                retry = _retryable(exc.status_code) or _channel_rejected(str(exc))
+                if retry and attempt_no < len(attempts):
                     continue
                 self.store.finish_request(
                     request_id,
@@ -613,7 +642,8 @@ class PoolGateway:
                     latency_ms=latency,
                     session_id=session_id,
                 )
-                if _retryable(response.status_code) and attempt_no < len(attempts):
+                retry = _retryable(response.status_code) or _channel_rejected(detail)
+                if retry and attempt_no < len(attempts):
                     continue
                 self.store.finish_request(
                     request_id,
@@ -632,6 +662,36 @@ class PoolGateway:
         detail = str(last_error) if last_error else "No WorkBuddy attempt succeeded"
         raise PoolHTTPError(503, "no_attempt_succeeded", detail)
 
+    async def _stream_with_heartbeat(
+        self, response: httpx.Response, interval: float = 15.0
+    ) -> AsyncIterator[bytes]:
+        """Forward upstream bytes; emit SSE comments while the upstream thinks.
+
+        A long tool-calling turn can be silent for minutes. Intermediaries and
+        client HTTP stacks (undici's body timeout is 300s) close an idle body;
+        a `: keep-alive` comment keeps the connection alive without changing
+        the event stream (SSE comment lines are ignored by parsers).
+        """
+        iterator = response.aiter_bytes().__aiter__()
+        pending: asyncio.Future | None = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.ensure_future(iterator.__anext__())
+                done, _ = await asyncio.wait({pending}, timeout=interval)
+                if not done:
+                    yield b": keep-alive\n\n"
+                    continue
+                task, pending = pending, None
+                try:
+                    chunk = task.result()
+                except StopAsyncIteration:
+                    return
+                yield chunk
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+
     async def stream_body(
         self,
         response: httpx.Response,
@@ -647,8 +707,10 @@ class PoolGateway:
         buffer = b""
         last_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "credit": None, "finish_reason": None}
         stream_error: Any = None
+        saw_done = False
+        saw_finish = False
         try:
-            async for chunk in response.aiter_bytes():
+            async for chunk in self._stream_with_heartbeat(response):
                 # Parse before yielding: a client may stop after the last content
                 # chunk, and a usage/finish event in that chunk must still land
                 # in the ledger.
@@ -661,7 +723,10 @@ class PoolGateway:
                     if not text.startswith(b"data:"):
                         continue
                     payload = text[5:].strip()
-                    if not payload or payload == b"[DONE]":
+                    if not payload:
+                        continue
+                    if payload == b"[DONE]":
+                        saw_done = True
                         continue
                     try:
                         value = json.loads(payload)
@@ -669,6 +734,12 @@ class PoolGateway:
                         continue
                     if not isinstance(value, dict):
                         continue
+                    choices = value.get("choices")
+                    if isinstance(choices, list):
+                        for choice in choices:
+                            if isinstance(choice, dict) and choice.get("finish_reason"):
+                                saw_finish = True
+                                last_usage["finish_reason"] = choice["finish_reason"]
                     if value.get("error"):
                         # Provider-level error delivered inside the stream. The
                         # client will see it too; record it so a 200-looking
@@ -704,6 +775,35 @@ class PoolGateway:
                     request_id,
                     status_code=502,
                     error_code="stream_error",
+                    attempts=attempt_no,
+                    duration_ms=latency,
+                )
+                return
+            if not saw_done and not saw_finish:
+                # The upstream closed the body without a terminal marker. That
+                # is a truncated stream, not a successful completion; clients
+                # see the same cut-off, so record it for diagnosis.
+                message = "upstream stream ended without [DONE] or finish_reason"
+                log.warning(
+                    "llm-agg: %s for %s/%s",
+                    message,
+                    attempt.provider,
+                    attempt.model_id,
+                )
+                self._failure(
+                    attempt=attempt,
+                    request_id=request_id,
+                    attempt_no=attempt_no,
+                    status_code=502,
+                    code="stream_incomplete",
+                    message=message,
+                    latency_ms=latency,
+                    session_id=session_id,
+                )
+                self.store.finish_request(
+                    request_id,
+                    status_code=502,
+                    error_code="stream_incomplete",
                     attempts=attempt_no,
                     duration_ms=latency,
                 )

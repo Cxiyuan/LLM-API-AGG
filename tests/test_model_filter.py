@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from catalogwatch.workbuddy.model_filter import is_pseudo_model, is_text_chat_model
+from catalogwatch.workbuddy.model_filter import (
+    is_pseudo_model,
+    is_text_chat_model,
+    is_tool_capable_model,
+)
 
 
 def test_pseudo_models_are_not_models():
@@ -28,6 +32,13 @@ def test_media_and_non_chat_models_are_filtered():
     ]
     for model_id, name in cases:
         assert not is_text_chat_model(model_id, name), model_id
+
+
+def test_diffusion_models_are_text_but_not_tool_safe():
+    model_id = "google/diffusiongemma-26b-a4b-it"
+    assert is_text_chat_model(model_id, "DiffusionGemma")
+    assert not is_tool_capable_model(model_id, "DiffusionGemma")
+    assert is_tool_capable_model("z-ai/glm-5.3-flash", "GLM-5.3-Flash")
 
 
 def test_text_chat_models_survive():
