@@ -50,11 +50,6 @@ export CATALOGWATCH_ADMIN_TOKEN
 CATALOGWATCH_KEY_PEPPER="$(load_or_create_secret "$SECRETS_DIR/pool_key_pepper" "${CATALOGWATCH_KEY_PEPPER:-}")"
 export CATALOGWATCH_KEY_PEPPER
 
-# Encrypts provider API keys entered through the console. Losing this file
-# makes those keys undecryptable (they must be re-entered).
-CATALOGWATCH_PROVIDER_KEY_SECRET="$(load_or_create_secret "$SECRETS_DIR/provider_key_secret" "${CATALOGWATCH_PROVIDER_KEY_SECRET:-}")"
-export CATALOGWATCH_PROVIDER_KEY_SECRET
-
 export DATA_DIR
 export CB_GATEWAY_DB_PATH="${CB_GATEWAY_DB_PATH:-$DATA_DIR/buddy2api/buddy2api.db}"
 export CB_GATEWAY_PROVIDERS="${CB_GATEWAY_PROVIDERS:-workbuddy,workbuddy-i}"
@@ -62,7 +57,6 @@ export CB_GATEWAY_AUTO_IMPORT="${CB_GATEWAY_AUTO_IMPORT:-0}"
 export CB_GATEWAY_ALLOW_UNAUTHENTICATED_API="${CB_GATEWAY_ALLOW_UNAUTHENTICATED_API:-0}"
 export CB_DOCKER=1
 export CATALOGWATCH_DB="${CATALOGWATCH_DB:-$DATA_DIR/catalogwatch/catalog.db}"
-export CATALOGWATCH_CONFIG_BASE="${CATALOGWATCH_CONFIG_BASE:-/app/config/providers.yaml}"
 export CATALOGWATCH_PORT="${CATALOGWATCH_PORT:-8788}"
 export BUDDY2API_URL="${BUDDY2API_URL:-http://127.0.0.1:8787}"
 export PYTHONDONTWRITEBYTECODE=1
@@ -73,10 +67,9 @@ cat <<EOF
 [entrypoint] data directory:  $DATA_DIR
 [entrypoint] WorkBuddy UI:   http://127.0.0.1:8787/  (bridge debug UI)
 [entrypoint] Pool console:   http://127.0.0.1:8788/
-[entrypoint] CatalogWatch:   http://127.0.0.1:8788/healthz
+[entrypoint] Pool health:    http://127.0.0.1:8788/healthz
 [entrypoint] bridge admin:   $SECRETS_DIR/admin_token (or CB_GATEWAY_ADMIN_TOKEN)
 [entrypoint] console token:  $SECRETS_DIR/catalogwatch_admin_token (or CATALOGWATCH_ADMIN_TOKEN)
-[entrypoint] provider keys:  $SECRETS_DIR/provider_key_secret (encrypts console-entered keys)
 [entrypoint] WorkBuddy login: docker exec -it <container> workbuddy-login --realm cn
 [entrypoint] Publish these ports on 127.0.0.1 only; never expose them publicly.
 

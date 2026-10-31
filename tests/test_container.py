@@ -6,7 +6,6 @@ import stat
 from pathlib import Path
 
 import httpx
-import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,49 +17,6 @@ def _load_bootstrap():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def test_workbuddy_provider_is_opt_in():
-    data = yaml.safe_load((ROOT / "config" / "providers.yaml").read_text(encoding="utf-8"))
-    provider = next(item for item in data["providers"] if item["id"] == "workbuddy")
-    assert provider["enabled"] is False
-    assert provider["adapter"] == "workbuddy"
-    assert provider["key_env"] == "WORKBUDDY_GATEWAY_KEY"
-    assert provider["base_url"] == "http://127.0.0.1:8787/v1"
-
-
-def test_container_config_enables_workbuddy(tmp_path):
-    module = _load_bootstrap()
-    base = tmp_path / "base.yaml"
-    base.write_text(
-        yaml.safe_dump(
-            {
-                "providers": [
-                    {
-                        "id": "workbuddy",
-                        "enabled": False,
-                        "adapter": "workbuddy",
-                        "base_url": "http://old/v1",
-                        "key_env": "OLD_KEY",
-                    },
-                    {"id": "other", "enabled": False},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    out = tmp_path / "out.yaml"
-
-    module.write_container_config(base, out, "http://127.0.0.1:8787")
-    data = yaml.safe_load(out.read_text(encoding="utf-8"))
-    workbuddy = next(item for item in data["providers"] if item["id"] == "workbuddy")
-    other = next(item for item in data["providers"] if item["id"] == "other")
-
-    assert workbuddy["enabled"] is True
-    assert workbuddy["base_url"] == "http://127.0.0.1:8787/v1"
-    assert workbuddy["key_env"] == "WORKBUDDY_GATEWAY_KEY"
-    assert workbuddy["key_required"] is True
-    assert other["enabled"] is False
 
 
 def test_gateway_key_is_provisioned_and_reused(tmp_path):
@@ -128,6 +84,14 @@ def test_gateway_key_is_replaced_when_the_database_was_reset(tmp_path):
     assert key == "sk-cb-new"
     assert posts["count"] == 1
     assert key_file.read_text(encoding="utf-8").strip() == "sk-cb-new"
+
+
+def test_bootstrap_has_no_provider_config_rewrite():
+    module = _load_bootstrap()
+    assert not hasattr(module, "write_container_config")
+    source = (ROOT / "deploy" / "start_catalogwatch.py").read_text(encoding="utf-8")
+    assert "providers.yaml" not in source
+    assert "CATALOGWATCH_CONFIG" not in source
 
 
 def test_vendored_bridge_is_pinned():

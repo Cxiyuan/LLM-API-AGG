@@ -1,3 +1,3 @@
-"""CatalogWatch: near-real-time free LLM model and quota catalog."""
+"""LLM-API-AGG: WorkBuddy multi-account pool gateway and console."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

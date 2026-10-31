@@ -127,11 +127,13 @@ jobs:
             http://127.0.0.1:18788/api/overview
           curl -fsS -H "Authorization: Bearer $ADMIN" \
             http://127.0.0.1:18788/api/workbuddy/accounts
-          # Unified model inventory + free catalog (WorkBuddy is one source).
+          # WorkBuddy-only inventory; the free-provider surface is gone.
           curl -fsS -H "Authorization: Bearer $ADMIN" \
-            http://127.0.0.1:18788/api/models | grep -q '"summary"'
-          curl -fsS -H "Authorization: Bearer $ADMIN" \
-            http://127.0.0.1:18788/api/catalog/free | grep -q '"items"'
+            http://127.0.0.1:18788/api/workbuddy/models | grep -q '"items"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $ADMIN" http://127.0.0.1:18788/api/models)" = "404"
+          test "$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $ADMIN" http://127.0.0.1:18788/api/providers)" = "404"
 
           # Pool data plane: create a key, list models, and verify a clean
           # no-account 503 (no crash) before any WorkBuddy login.
@@ -151,11 +153,9 @@ jobs:
           test "$CODE" = "503"
           grep -q '"no_accounts"' /tmp/pool-chat.json
 
-          # The bootstrap must have enabled the WorkBuddy provider in the
-          # generated CatalogWatch config.
-          docker exec free-llm-smoke /opt/venv/bin/python -c \
-            "import yaml; d=yaml.safe_load(open('/data/catalogwatch/providers.yaml')); p=[x for x in d['providers'] if x['id']=='workbuddy'][0]; assert p['enabled'] is True and p['base_url'].endswith(':8787/v1'), p"
-          curl -fsS http://127.0.0.1:18788/providers | grep -q workbuddy
+          # The bootstrap must have provisioned the bridge gateway key.
+          docker exec free-llm-smoke test -s /data/secrets/gateway_key
+          docker exec free-llm-smoke test ! -e /data/catalogwatch/providers.yaml
 
       - name: Container logs
         if: always()

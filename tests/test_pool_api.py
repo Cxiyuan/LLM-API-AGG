@@ -8,20 +8,7 @@ from catalogwatch.util import utcnow_iso
 
 
 def _settings(tmp_path):
-    config = tmp_path / "providers.yaml"
-    config.write_text(
-        """
-providers:
-  - id: demo
-    name: Demo
-    adapter: openai_models
-    base_url: https://example.com/v1
-    key_required: false
-    free_kind: free_tier
-""",
-        encoding="utf-8",
-    )
-    return load_settings(config, db_path=tmp_path / "api.db")
+    return load_settings(db_path=tmp_path / "api.db")
 
 
 class _FakeResponse:
@@ -92,7 +79,6 @@ def _seed(service):
 
 
 def test_pool_key_and_chat_ledger(tmp_path, monkeypatch):
-    monkeypatch.setenv("CATALOGWATCH_SCHEDULER", "0")
     monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
     monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
@@ -199,7 +185,6 @@ def test_pool_key_and_chat_ledger(tmp_path, monkeypatch):
 
 
 def test_pool_key_daily_limit(tmp_path, monkeypatch):
-    monkeypatch.setenv("CATALOGWATCH_SCHEDULER", "0")
     monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
     monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
@@ -230,3 +215,38 @@ def test_pool_key_daily_limit(tmp_path, monkeypatch):
         )
         assert second.status_code == 429
         assert second.json()["error"]["code"] == "key_rate_limited"
+
+
+def test_pool_rejects_direct_provider_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
+    monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BUDDY2API_URL", "http://127.0.0.1:1")
+
+    app = create_app(_settings(tmp_path))
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/keys",
+            headers={"Authorization": "Bearer test-admin-token"},
+            json={"name": "smoke", "kind": "shared", "daily_request_limit": 0},
+        )
+        pool_key = created.json()["key"]
+        auth = {"Authorization": f"Bearer {pool_key}"}
+        _seed(app.state.workbuddy)
+
+        models = client.get("/v1/models", headers=auth).json()["data"]
+        ids = {item["id"] for item in models}
+        assert "auto" in ids
+        assert all(not item.startswith("nvidia/") for item in ids)
+
+        response = client.post(
+            "/v1/chat/completions",
+            headers=auth,
+            json={
+                "model": "nvidia/stepfun-ai/step-5-preview",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "model_unavailable"

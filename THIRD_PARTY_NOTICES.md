@@ -19,6 +19,6 @@ use. Do not use it for multi-account pooling, resale, or public hosting.
 
 ## Other dependencies
 
-CatalogWatch's Python dependencies are declared in `pyproject.toml`; the bridge's pinned
+LLM-API-AGG's Python dependencies are declared in `pyproject.toml`; the bridge's pinned
 dependencies are in `vendor/buddy2api/requirements.txt`. Their licenses are available
 from their respective packages.

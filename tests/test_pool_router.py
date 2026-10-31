@@ -64,3 +64,84 @@ def test_router_rejects_when_no_accounts(tmp_path):
         router.plan(intent, {"id": 1, "allowed_models": None, "max_attempts": 3})
     assert exc.value.code == "no_accounts"
     db.close()
+
+
+def _router_with_models(tmp_path, models):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    _account(store, 1, 100)
+    store.upsert_models("workbuddy", models)
+    router = PoolRouter(store, WorkBuddyCatalog(store, None))
+    key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
+    return db, router, key
+
+
+def test_router_rejects_non_workbuddy_provider_ids(tmp_path):
+    db, router, key = _router_with_models(
+        tmp_path, [{"id": "free-model", "credits": 0, "contextWindow": 100000}]
+    )
+    try:
+        for model in ("nvidia/stepfun-ai/step-5-preview", "groq/llama-3.3-70b"):
+            intent = extract_intent(
+                {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+            )
+            with pytest.raises(PoolError) as exc:
+                router.plan(intent, key)
+            assert exc.value.code == "model_unavailable"
+            assert exc.value.status_code == 404
+    finally:
+        db.close()
+
+
+def test_router_accepts_explicit_workbuddy_wire_id(tmp_path):
+    db, router, key = _router_with_models(
+        tmp_path, [{"id": "free-model", "credits": 0, "contextWindow": 100000}]
+    )
+    try:
+        intent = extract_intent(
+            {"model": "workbuddy/free-model", "messages": [{"role": "user", "content": "hi"}]}
+        )
+        attempts = router.plan(intent, key)
+        assert attempts[0].model_id == "free-model"
+        assert attempts[0].wire_id == "workbuddy/free-model"
+        assert attempts[0].account["account_id"] == 1
+    finally:
+        db.close()
+
+
+def test_router_rejects_non_text_explicit_model(tmp_path):
+    db, router, key = _router_with_models(
+        tmp_path, [{"id": "free-model", "credits": 0, "contextWindow": 100000}]
+    )
+    try:
+        intent = extract_intent(
+            {"model": "workbuddy/kling-video", "messages": [{"role": "user", "content": "hi"}]}
+        )
+        with pytest.raises(PoolError) as exc:
+            router.plan(intent, key)
+        assert exc.value.code == "model_not_text"
+        assert exc.value.status_code == 400
+    finally:
+        db.close()
+
+
+def test_router_keeps_diffusion_models_out_of_tool_requests(tmp_path):
+    db, router, key = _router_with_models(
+        tmp_path,
+        [
+            {"id": "diffusiongemma-26b", "credits": 0, "contextWindow": 100000},
+            {"id": "tool-model", "credits": 0.5, "contextWindow": 100000},
+        ],
+    )
+    try:
+        intent = extract_intent(
+            {
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "ping", "parameters": {}}}],
+            }
+        )
+        attempts = router.plan(intent, key)
+        assert [item.model_id for item in attempts] == ["tool-model"]
+    finally:
+        db.close()

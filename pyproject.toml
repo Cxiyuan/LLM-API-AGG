@@ -1,15 +1,11 @@
 [project]
 name = "catalogwatch"
-version = "0.1.0"
-description = "Near-real-time catalog of free LLM models and provider quota pages"
+version = "0.2.0"
+description = "WorkBuddy multi-account pool gateway and console"
 requires-python = ">=3.11"
 dependencies = [
-  "beautifulsoup4>=4.12.3",
-  "cryptography>=42.0.0",
   "fastapi>=0.115.0",
   "httpx>=0.27.0",
-  "python-dotenv>=1.0.1",
-  "pyyaml>=6.0.2",
   "uvicorn[standard]>=0.30.0",
 ]
 

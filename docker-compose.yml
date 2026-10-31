@@ -26,23 +26,12 @@ services:
     pull_policy: always
     ports:
       - "127.0.0.1:8787:8787"   # Buddy2api: WorkBuddy login + /v1 gateway
-      - "127.0.0.1:8788:8788"   # CatalogWatch API
+      - "127.0.0.1:8788:8788"   # WorkBuddy pool console + /v1 gateway
     volumes:
       - ./data:/data
     environment:
       CB_GATEWAY_ADMIN_TOKEN: ${CB_GATEWAY_ADMIN_TOKEN:-}
       CB_GATEWAY_MASTER_KEY: ${CB_GATEWAY_MASTER_KEY:-}
-      # Free-provider inference keys (unified /v1). A provider only becomes
-      # callable when its key is set; WorkBuddy stays the bridge source.
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
-      COHERE_API_KEY: ${COHERE_API_KEY:-}
-      SAMBANOVA_API_KEY: ${SAMBANOVA_API_KEY:-}
-      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
-      ZAI_API_KEY: ${ZAI_API_KEY:-}
       TZ: ${TZ:-Asia/Shanghai}
     security_opt:
       - no-new-privileges:true

@@ -7,24 +7,10 @@ from catalogwatch.config import load_settings
 
 
 def _settings(tmp_path):
-    config = tmp_path / "providers.yaml"
-    config.write_text(
-        """
-providers:
-  - id: demo
-    name: Demo
-    adapter: openai_models
-    base_url: https://example.com/v1
-    key_required: false
-    free_kind: free_tier
-""",
-        encoding="utf-8",
-    )
-    return load_settings(config, db_path=tmp_path / "api.db")
+    return load_settings(db_path=tmp_path / "api.db")
 
 
 def test_console_auth_and_empty_accounts(tmp_path, monkeypatch):
-    monkeypatch.setenv("CATALOGWATCH_SCHEDULER", "0")
     monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
     monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")

@@ -3,59 +3,71 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from catalogwatch.api import create_app
-from catalogwatch.config import load_settings
+from catalogwatch.config import Settings
 
 
-def test_api_health_and_empty_catalog(tmp_path, monkeypatch):
-    monkeypatch.setenv("CATALOGWATCH_SCHEDULER", "0")
+def _client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
-    config = tmp_path / "providers.yaml"
-    config.write_text(
-        """
-providers:
-  - id: demo
-    name: Demo
-    adapter: openai_models
-    base_url: https://example.com/v1
-    key_required: false
-    free_kind: free_tier
-""",
-        encoding="utf-8",
-    )
-    settings = load_settings(config, db_path=tmp_path / "api.db")
+    monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
+    monkeypatch.setenv("BUDDY2API_URL", "http://127.0.0.1:1")
+    return TestClient(create_app(Settings(db_path=tmp_path / "api.db")))
 
-    with TestClient(create_app(settings)) as client:
+
+def test_health_and_removed_catalog_routes(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
         health = client.get("/healthz")
         assert health.status_code == 200
-        assert health.json()["ok"] is True
+        body = health.json()
+        assert body["ok"] is True
+        assert "accounts" in body["stats"]
+        assert "models" in body["stats"]
+        assert "workbuddy" in body
 
-        catalog = client.get("/catalog")
-        assert catalog.status_code == 200
-        assert catalog.json()["providers"] == []
+        for path in (
+            "/stats",
+            "/providers",
+            "/models",
+            "/catalog",
+            "/changes",
+            "/quota/sources",
+        ):
+            assert client.get(path).status_code == 404, path
+        assert client.post("/poll").status_code == 404
 
-        providers = client.get("/providers").json()["items"]
-        assert providers[0]["id"] == "demo"
 
-        changes = client.get("/changes?since=24h")
-        assert changes.status_code == 200
-        assert changes.json()["items"] == []
+def test_admin_auth_and_console(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        assert client.get("/api/overview").status_code == 401
+        response = client.get(
+            "/api/overview",
+            headers={"Authorization": "Bearer test-admin-token"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert "overview" in payload
+        assert "bridge" in payload
+
+        page = client.get("/")
+        assert page.status_code == 200
+        assert "LLM-API-AGG" in page.text
+        assert "免费目录" not in page.text
+        assert "厂商 Key" not in page.text
 
 
-def test_api_rejects_bad_since(tmp_path, monkeypatch):
-    monkeypatch.setenv("CATALOGWATCH_SCHEDULER", "0")
-    monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
-    config = tmp_path / "providers.yaml"
-    config.write_text(
-        """
-providers:
-  - id: demo
-    base_url: https://example.com/v1
-    key_required: false
-""",
-        encoding="utf-8",
-    )
-    settings = load_settings(config, db_path=tmp_path / "api.db")
+def test_removed_catalog_modules_are_gone():
+    import importlib.util
 
-    with TestClient(create_app(settings)) as client:
-        response = client.get("/changes?since=whenever")
-        assert response.status_code == 400
+    for name in (
+        "catalogwatch.poller",
+        "catalogwatch.quota",
+        "catalogwatch.extract",
+        "catalogwatch.notify",
+        "catalogwatch.models",
+        "catalogwatch.keystore",
+        "catalogwatch.service",
+        "catalogwatch.adapters",
+        "catalogwatch.workbuddy.direct",
+    ):
+        assert importlib.util.find_spec(name) is None, name

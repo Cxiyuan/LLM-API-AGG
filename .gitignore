@@ -8,4 +8,3 @@ data/
 *.db-wal
 *.db-shm
 exports/
-README.md

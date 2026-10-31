@@ -7,13 +7,11 @@ import logging
 import os
 import time
 
-from ..config import Settings
 from ..db import Database
 from ..util import utcnow_iso
 from .accounts import WorkBuddyAccounts
 from .bridge import BuddyBridge
 from .catalog import WorkBuddyCatalog, cost_summary
-from .direct import DirectSource
 from .gateway import PoolGateway
 from .reconcile import Reconciler
 from .router import PoolRouter
@@ -32,10 +30,8 @@ def _seconds(store: WorkBuddyStore, key: str, default: int, minimum: int, maximu
 
 
 class WorkBuddyService:
-    def __init__(self, settings: Settings, db: Database, key_store=None):
-        self.settings = settings
+    def __init__(self, db: Database):
         self.store = WorkBuddyStore(db)
-        self.key_store = key_store
         self.bridge = BuddyBridge(
             base_url=os.environ.get("BUDDY2API_URL", "http://127.0.0.1:8787"),
             admin_token=os.environ.get("CB_GATEWAY_ADMIN_TOKEN", ""),
@@ -43,12 +39,8 @@ class WorkBuddyService:
         )
         self.catalog = WorkBuddyCatalog(self.store, self.bridge)
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)
-        # Direct free-provider inference: WorkBuddy is just one resource source.
-        self.direct = DirectSource(settings, self.store, key_store=key_store)
-        self.router = PoolRouter(self.store, self.catalog, direct=self.direct)
-        self.gateway = PoolGateway(
-            self.store, self.router, self.bridge, direct=self.direct
-        )
+        self.router = PoolRouter(self.store, self.catalog)
+        self.gateway = PoolGateway(self.store, self.router, self.bridge)
         self.reconciler = Reconciler(self.store, self.bridge)
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -60,10 +52,7 @@ class WorkBuddyService:
         return lock
 
     async def aclose(self) -> None:
-        try:
-            await self.direct.aclose()
-        finally:
-            await self.bridge.aclose()
+        await self.bridge.aclose()
 
     async def refresh_catalog(self, *, force: bool = False) -> list[dict]:
         async with self._lock("catalog"):

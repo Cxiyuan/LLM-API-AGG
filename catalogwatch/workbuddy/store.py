@@ -1,6 +1,6 @@
 """SQLite access for the WorkBuddy pool control plane.
 
-All methods use the CatalogWatch Database's shared connection and write lock.
+All methods use the pool Database's shared connection and write lock.
 Keep transactions short and never call HTTP while holding the lock.
 """
 
@@ -455,37 +455,6 @@ class WorkBuddyStore:
             (str(row["provider"]), str(row["model_id"])): int(row["ok"] or 0)
             for row in rows
         }
-
-    def list_catalog_models(
-        self, *, present: bool = True, free: bool | None = None
-    ) -> list[dict]:
-        """Free-LLM catalog rows (the original provider-discovery side).
-
-        Read-only view used by the unified model inventory and by direct
-        inference: WorkBuddy is just one source, next to OpenRouter/Groq/etc.
-        """
-        where = ["1 = 1"]
-        params: list[Any] = []
-        if present:
-            where.append("present = 1")
-        if free is not None:
-            where.append("is_free = ?")
-            params.append(int(free))
-        rows = self.conn.execute(
-            "SELECT provider_id, model_id, name, context_length, max_output,"
-            " is_free, free_kind, pricing_json, present"
-            f" FROM models WHERE {' AND '.join(where)}"
-            " ORDER BY provider_id, model_id",
-            params,
-        ).fetchall()
-        result: list[dict] = []
-        for row in rows:
-            item = dict(row)
-            item["is_free"] = bool(item.get("is_free"))
-            item["present"] = bool(item.get("present"))
-            item["pricing"] = _loads(item.pop("pricing_json", None), None)
-            result.append(item)
-        return result
 
     def get_model(self, provider: str, model_id: str) -> dict | None:
         row = self.conn.execute(

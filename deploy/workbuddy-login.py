@@ -36,6 +36,14 @@ def _admin_token() -> str:
     return _read(data_dir / "secrets" / "admin_token")
 
 
+def _catalog_token() -> str:
+    token = os.environ.get("CATALOGWATCH_ADMIN_TOKEN", "").strip()
+    if token:
+        return token
+    data_dir = Path(os.environ.get("DATA_DIR", "/data"))
+    return _read(data_dir / "secrets" / "catalogwatch_admin_token")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Log in to WorkBuddy through Buddy2api")
     parser.add_argument("--realm", choices=("cn", "global"), default="cn")
@@ -48,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--catalog-url",
         default=os.environ.get("CATALOGWATCH_URL", "http://127.0.0.1:8788"),
-        help="CatalogWatch base URL, used for a best-effort refresh after login",
+        help="WorkBuddy pool base URL, used for a best-effort catalog refresh after login",
     )
     args = parser.parse_args(argv)
 
@@ -112,16 +120,23 @@ def main(argv: list[str] | None = None) -> int:
                     nickname = result.get("nickname") or "unknown"
                     masked = result.get("uid_masked") or ""
                     print(f"Logged in as {nickname} {masked}".rstrip())
-                    try:
-                        with httpx.Client(timeout=60.0) as catalog:
-                            refreshed = catalog.post(
-                                f"{args.catalog_url.rstrip('/')}/poll",
-                                params={"provider": "workbuddy", "notify": "false"},
+                    catalog_token = _catalog_token()
+                    if catalog_token:
+                        try:
+                            with httpx.Client(timeout=60.0) as pool:
+                                refreshed = pool.post(
+                                    f"{args.catalog_url.rstrip('/')}/api/workbuddy/catalog/refresh",
+                                    headers={"Authorization": f"Bearer {catalog_token}"},
+                                )
+                            print(f"WorkBuddy catalog refresh: HTTP {refreshed.status_code}")
+                        except httpx.HTTPError as exc:
+                            print(
+                                f"WorkBuddy catalog refresh skipped: {exc}",
+                                file=sys.stderr,
                             )
-                        print(f"CatalogWatch refresh: HTTP {refreshed.status_code}")
-                    except httpx.HTTPError as exc:
+                    else:
                         print(
-                            f"CatalogWatch refresh skipped: {exc}",
+                            "WorkBuddy catalog refresh skipped: no CATALOGWATCH_ADMIN_TOKEN",
                             file=sys.stderr,
                         )
                     return 0

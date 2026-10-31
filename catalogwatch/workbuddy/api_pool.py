@@ -78,27 +78,24 @@ async def list_models(request: Request) -> dict:
             "object": "model",
             "created": 0,
             "owned_by": "llm-agg",
-            "description": "Global cost/load-aware selection across all sources: free first, then low multiplier",
+            "description": "Global cost/load-aware selection across your WorkBuddy accounts: free first, then low multiplier",
         },
         {
             "id": "free",
             "object": "model",
             "created": 0,
             "owned_by": "llm-agg",
-            "description": "Only models that are free at the current time (all sources)",
+            "description": "Only WorkBuddy models that are free at the current time",
         },
         {
             "id": "cheap",
             "object": "model",
             "created": 0,
             "owned_by": "llm-agg",
-            "description": "Lowest current effective multiplier across all sources",
+            "description": "Lowest current effective WorkBuddy multiplier",
         },
     ]
     resources = list(service.catalog.list_costs())
-    direct = getattr(service, "direct", None)
-    if direct is not None:
-        resources.extend(direct.candidates())
     for item in resources:
         model_id = item["model_id"]
         pool_id = f"{item['provider']}/{model_id}"

@@ -19,7 +19,6 @@ import httpx
 
 from ..util import utcnow_iso
 from .bridge import BridgeError, BuddyBridge
-from .direct import DirectError, DirectSource
 from .router import ALIASES, Attempt, PoolError, PoolIntent, PoolRouter, extract_intent
 from .store import WorkBuddyStore
 
@@ -39,7 +38,7 @@ def error_body(code: str, message: str) -> dict:
 
 
 def _retryable(status: int) -> bool:
-    # 0 = direct-provider transport failure (no HTTP status reached us).
+    # 0 = transport failure before an HTTP status reached us.
     # 404 = the catalog listed a model this account cannot serve; try another.
     return status in {0, 401, 403, 404, 408, 409, 425, 429, 500, 502, 503, 504}
 
@@ -141,12 +140,10 @@ class PoolGateway:
         store: WorkBuddyStore,
         router: PoolRouter,
         bridge: BuddyBridge,
-        direct: DirectSource | None = None,
     ):
         self.store = store
         self.router = router
         self.bridge = bridge
-        self.direct = direct
 
     # --------------------------------------------------------------- bookkeeping
 
@@ -195,8 +192,7 @@ class PoolGateway:
 
     @staticmethod
     def _attempt_headers(attempt: Attempt, request_id: str, attempt_no: int) -> dict[str, str]:
-        if attempt.source == "direct" or attempt.account is None:
-            # Direct providers authenticate with their own key; no bridge hints.
+        if attempt.account is None:
             return {}
         return {
             "X-WorkBuddy-Account": str(attempt.account.get("account_id")),
@@ -249,9 +245,6 @@ class PoolGateway:
         completion = int(usage.get("completion_tokens") or 0)
         total = int(usage.get("total_tokens") or (prompt + completion))
         credit = usage.get("credit")
-        if attempt.source == "direct":
-            # Direct sources only proxy free models: the cost is known zero.
-            credit = 0.0
         credit_value = float(credit) if credit is not None else 0.0
         self.store.record_attempt(
             request_id=request_id,
@@ -276,11 +269,7 @@ class PoolGateway:
             credits=credit,
             credits_estimated=0,
             effective_credits=attempt.effective_credits,
-            cost_source=(
-                "free"
-                if attempt.source == "direct"
-                else ("upstream" if credit is not None else "pending")
-            ),
+            cost_source="upstream" if credit is not None else "pending",
             status_code=status_code,
             finish_reason=usage.get("finish_reason"),
             attempts=attempt_no,
@@ -353,8 +342,6 @@ class PoolGateway:
             # account cannot serve ("Function ... not found"). Do not cool the
             # whole account down; avoid this model and let the retry move on.
             self.router.load.cooldown(attempt.provider, attempt.model_id, 1800)
-            if attempt.source == "direct" and self.direct is not None:
-                self.direct.mark_cooldown(attempt.provider, attempt.model_id, status_code)
             if session_id:
                 binding = self.store.get_session(session_id)
                 if (
@@ -363,10 +350,6 @@ class PoolGateway:
                     and str(binding.get("model_id")) == attempt.model_id
                 ):
                     self.store.delete_session(session_id)
-            return
-        if attempt.source == "direct":
-            if self.direct is not None:
-                self.direct.mark_cooldown(attempt.provider, attempt.model_id, status_code)
             return
         if account_id is None:
             return
@@ -442,7 +425,7 @@ class PoolGateway:
     ) -> tuple[int, dict, dict[str, str]]:
         intent = extract_intent(payload)
         attempts = self.router.plan(
-            intent, key, session_id=session_id, allow_direct=endpoint != "responses"
+            intent, key, session_id=session_id
         )
         self._reserve(key)
         request_id = "wb-" + secrets.token_hex(12)
@@ -454,22 +437,16 @@ class PoolGateway:
 
         for attempt_no, attempt in enumerate(attempts, start=1):
             body = dict(payload)
-            body["model"] = (
-                attempt.model_id if attempt.source == "direct" else attempt.wire_id
-            )
+            body["model"] = attempt.wire_id
             headers = self._attempt_headers(attempt, request_id, attempt_no)
             self.router.load.enter(
                 attempt.provider,
                 attempt.model_id,
-                int(attempt.account["account_id"]) if attempt.account else None,
+                int(attempt.account["account_id"]),
             )
             started = time.monotonic()
             try:
-                if attempt.source == "direct":
-                    if self.direct is None:
-                        raise DirectError(503, "direct inference is not configured")
-                    response = await self.direct.post_chat(attempt.provider, body)
-                elif endpoint == "responses":
+                if endpoint == "responses":
                     response = await self.bridge.post_responses_with_headers(body, headers)
                 else:
                     response = await self.bridge.post_chat_with_headers(body, headers)
@@ -483,7 +460,7 @@ class PoolGateway:
                     latency_ms=latency,
                 )
                 raise
-            except (BridgeError, DirectError) as exc:
+            except BridgeError as exc:
                 last_error = exc
                 latency = int((time.monotonic() - started) * 1000)
                 self._failure(
@@ -563,7 +540,7 @@ class PoolGateway:
     ) -> tuple[httpx.Response, Attempt, str, int, dict[str, str], int, dict]:
         intent = extract_intent(payload)
         attempts = self.router.plan(
-            intent, key, session_id=session_id, allow_direct=endpoint != "responses"
+            intent, key, session_id=session_id
         )
         self._reserve(key)
         request_id = "wb-" + secrets.token_hex(12)
@@ -574,22 +551,16 @@ class PoolGateway:
 
         for attempt_no, attempt in enumerate(attempts, start=1):
             body = dict(payload)
-            body["model"] = (
-                attempt.model_id if attempt.source == "direct" else attempt.wire_id
-            )
+            body["model"] = attempt.wire_id
             headers = self._attempt_headers(attempt, request_id, attempt_no)
             self.router.load.enter(
                 attempt.provider,
                 attempt.model_id,
-                int(attempt.account["account_id"]) if attempt.account else None,
+                int(attempt.account["account_id"]),
             )
             started = time.monotonic()
             try:
-                if attempt.source == "direct":
-                    if self.direct is None:
-                        raise DirectError(503, "direct inference is not configured")
-                    response = await self.direct.open_chat(attempt.provider, body)
-                elif endpoint == "responses":
+                if endpoint == "responses":
                     response = await self.bridge.open_responses_stream(body, headers)
                 else:
                     response = await self.bridge.open_chat_stream(body, headers)
@@ -602,7 +573,7 @@ class PoolGateway:
                     latency_ms=latency,
                 )
                 raise
-            except (BridgeError, DirectError) as exc:
+            except BridgeError as exc:
                 last_error = exc
                 latency = int((time.monotonic() - started) * 1000)
                 self._failure(

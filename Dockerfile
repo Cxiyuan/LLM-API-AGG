@@ -2,7 +2,7 @@
 #
 # One image, two processes (supervised):
 #   - Buddy2api: WorkBuddy browser/device login + OpenAI-compatible gateway (:8787)
-#   - CatalogWatch: free-model catalog API + scheduler (:8788)
+#   - WorkBuddy pool: multi-account console + /v1 gateway (:8788)
 #
 # Publish both ports on the host loopback only. The bridge is an unofficial
 # personal-use integration; see THIRD_PARTY_NOTICES.md.
@@ -16,8 +16,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/app \
     DATA_DIR=/data \
     BUDDY2API_URL=http://127.0.0.1:8787 \
-    CATALOGWATCH_PORT=8788 \
-    CATALOGWATCH_CONFIG_BASE=/app/config/providers.yaml
+    CATALOGWATCH_PORT=8788
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -32,10 +31,9 @@ RUN python -m venv /opt/venv
 
 WORKDIR /app
 
-# CatalogWatch first, then the bridge's pinned dependency set.
+# Pool console first, then the bridge's pinned dependency set.
 COPY pyproject.toml ./
 COPY catalogwatch ./catalogwatch
-COPY config ./config
 RUN pip install --upgrade pip && pip install .
 
 COPY vendor/buddy2api/requirements.txt /tmp/buddy2api-requirements.txt
