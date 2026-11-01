@@ -77,3 +77,63 @@ def test_console_auth_and_empty_accounts(tmp_path, monkeypatch):
             "/api/auth/login", json={"username": "ops", "password": "s3cret"}
         )
         assert new.status_code == 200
+
+
+def test_checkin_rules_and_overview_api(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
+    monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BUDDY2API_URL", "http://127.0.0.1:1")
+
+    app = create_app(_settings(tmp_path))
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin"}
+        )
+        assert login.status_code == 200
+        service = app.state.workbuddy
+        service.store.upsert_account(
+            {"id": 1, "provider": "workbuddy", "name": "cn", "status": "active"}
+        )
+
+        async def status(force: bool = False) -> dict:
+            return {
+                "results": [
+                    {
+                        "account_id": 1,
+                        "ok": True,
+                        "today_checked_in": True,
+                        "message": "今日已领取",
+                    }
+                ]
+            }
+
+        service.accounts.checkin_status = status  # type: ignore[method-assign]
+        csrf = {"X-CSRF-Token": client.cookies.get("cw_csrf") or ""}
+
+        saved = client.put(
+            "/api/workbuddy/checkin/settings",
+            headers=csrf,
+            json={"enabled": True, "hour": 9, "minute": 30, "confirm_risk": True},
+        )
+        assert saved.status_code == 200
+        rule = client.put(
+            "/api/workbuddy/checkin/accounts/1",
+            headers=csrf,
+            json={"enabled": True, "hour": 23, "minute": 5},
+        )
+        assert rule.status_code == 200
+
+        overview = client.get("/api/workbuddy/checkin").json()
+        assert overview["global"] == {"enabled": True, "hour": 9, "minute": 30}
+        item = overview["accounts"][0]
+        assert item["rule"]["source"] == "account"
+        assert item["rule"]["hour"] == 23
+        assert item["checkin"]["checked_today"] is True
+
+        cleared = client.delete("/api/workbuddy/checkin/accounts/1", headers=csrf)
+        assert cleared.status_code == 200
+        overview = client.get("/api/workbuddy/checkin").json()
+        assert overview["accounts"][0]["rule"]["source"] == "global"
+        assert overview["accounts"][0]["rule"]["hour"] == 9
