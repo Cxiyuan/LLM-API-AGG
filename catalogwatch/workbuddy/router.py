@@ -765,18 +765,21 @@ class PoolRouter:
         if not binding_valid and self._balanced_sharing(policy, intent):
             preferred = self._preferred_provider(models)
             if preferred:
-                models = [
-                    *[
-                        item
-                        for item in models
-                        if str(item.get("provider")) == preferred
-                    ],
-                    *[
-                        item
-                        for item in models
-                        if str(item.get("provider")) != preferred
-                    ],
+                preferred_models = [
+                    item for item in models if str(item.get("provider")) == preferred
                 ]
+                other_models = [
+                    item for item in models if str(item.get("provider")) != preferred
+                ]
+                models = []
+                # Preferred provider first, but interleave the other side so a
+                # failed preferred attempt still has a fallback within
+                # max_attempts.
+                while preferred_models or other_models:
+                    if preferred_models:
+                        models.append(preferred_models.pop(0))
+                    if other_models:
+                        models.append(other_models.pop(0))
 
         max_attempts = max(1, min(5, int(policy.get("max_attempts") or 3)))
         used_pairs: set[tuple[int, str]] = set()
