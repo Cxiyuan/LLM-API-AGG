@@ -162,6 +162,7 @@ def test_scheduling_policy_and_schedule_api(tmp_path, monkeypatch):
             [
                 {"id": "free-model", "credits": 0.0, "contextWindow": 100000},
                 {"id": "paid-model", "credits": 0.2, "contextWindow": 100000},
+                {"id": "full-model", "credits": 0.3, "contextWindow": 100000},
             ],
         )
         service.store.replace_promotions(
@@ -214,7 +215,13 @@ def test_scheduling_policy_and_schedule_api(tmp_path, monkeypatch):
         assert payload["night_window"]["end"] == "08:00"
         assert payload["night_window"]["source"] == "manual"
         assert payload["account_sharing"] == "balanced"
+        assert payload["deny_full_price"] is True
         assert set(payload["providers"]) == {"workbuddy"}
+        full = next(
+            item for item in payload["models"] if item["model_id"] == "full-model"
+        )
+        assert full["full_price"] is True
+        assert full["eligible"] is False
         model = next(
             item for item in payload["models"] if item["model_id"] == "paid-model"
         )

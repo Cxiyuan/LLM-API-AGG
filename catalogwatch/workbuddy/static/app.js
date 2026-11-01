@@ -780,6 +780,8 @@
     nightAuto.checked = policy.night_auto !== false;
     const nightStart = el("input", { type: "text", value: policy.night_start || "23:00" });
     const nightEnd = el("input", { type: "text", value: policy.night_end || "08:00" });
+    const denyFull = el("input", { type: "checkbox" });
+    denyFull.checked = policy.deny_full_price !== false;
     const sharing = el(
       "select",
       {},
@@ -819,7 +821,7 @@
       num(item.night_credits),
       item.free ? "免费" : item.promotion_active ? "折扣 " + fmt(item.promotion_factor) : "原价",
       item.night_specific ? "夜间专属" : "—",
-      bucketLabel[item.bucket] || item.bucket || "—",
+      item.full_price && item.eligible === false ? "原价（不调度）" : (bucketLabel[item.bucket] || item.bucket || "—"),
     ]);
 
     setView(
@@ -835,6 +837,7 @@
           "div",
           { class: "form-grid" },
           el("label", { class: "field" }, "账号均摊策略", sharing),
+          el("label", { class: "field" }, "禁止原价模型（自动调度）", denyFull),
           el("label", { class: "field" }, "自动识别夜间时段", nightAuto),
           el("label", { class: "field" }, "夜间开始（HH:MM）", nightStart),
           el("label", { class: "field" }, "夜间结束（HH:MM）", nightEnd)
@@ -845,8 +848,8 @@
         rankRow(nightRanks),
         el("p", {
           class: "muted",
-          text: "夜间顺序默认：夜间免费 > 夜间折扣 > 通用免费 > 普通折扣 > 原价。"
-            + "白天顺序默认：免费 > 折扣 > 原价。夜间时段会自动从模型促销窗口推导，也可关闭自动识别后手动设置。",
+          text: "夜间顺序默认：夜间免费 > 夜间折扣 > 全天免费 > 普通折扣；白天：全天免费 > 折扣。"
+            + " 原价模型不参与自动调度；夜间时段自动从模型促销窗口推导，也可关闭自动识别后手动设置。",
         }),
         el("h3", {}, "基础路由参数"),
         el(
@@ -878,6 +881,7 @@
               night_start: nightStart.value.trim(),
               night_end: nightEnd.value.trim(),
               account_sharing: sharing.value,
+              deny_full_price: denyFull.checked,
               day_priority: {},
               night_priority: {},
             };

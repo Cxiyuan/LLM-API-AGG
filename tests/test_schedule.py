@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from catalogwatch.workbuddy.schedule import (
     derive_night_window,
+    is_full_price,
     evaluate,
     is_night,
     night_window,
@@ -112,3 +113,19 @@ def test_period_and_tier_buckets():
 
     assert is_night(datetime(2026, 11, 2, 7, 0, tzinfo=TZ), 1380, 480) is True
     assert is_night(datetime(2026, 11, 2, 12, 0, tzinfo=TZ), 1380, 480) is False
+
+
+def test_full_price_detection():
+    assert is_full_price({"credits": 0.2, "base_credits": 0.2, "free": False}) is True
+    assert is_full_price({"credits": None, "base_credits": 0.2, "free": False}) is True
+    assert is_full_price({"credits": 0.0, "base_credits": 0.2, "free": True}) is False
+    assert is_full_price(
+        {
+            "credits": 0.1,
+            "base_credits": 0.2,
+            "free": False,
+            "promotion_active": True,
+            "promotion_factor": 0.5,
+        }
+    ) is False
+    assert is_full_price({"credits": 0.1, "base_credits": 0.2, "free": False}) is False

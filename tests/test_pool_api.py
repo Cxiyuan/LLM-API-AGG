@@ -290,6 +290,24 @@ def test_auto_retries_next_model_on_context_400(tmp_path, monkeypatch):
             ],
         )
 
+        service.store.replace_promotions(
+            "workbuddy",
+            {
+                "paid-model": [
+                    {
+                        "label": "限时折扣",
+                        "color": None,
+                        "factor": 0.5,
+                        "priority": 0,
+                        "active_only": False,
+                        "schedule": None,
+                        "text_zh": "",
+                        "text_en": "",
+                    }
+                ]
+            },
+        )
+
         class _Bridge:
             def __init__(self):
                 self.models = []
@@ -384,11 +402,29 @@ def _stream_service(tmp_path, monkeypatch):
             {"id": "paid-model", "credits": 0.2, "contextWindow": 100000},
         ],
     )
+    service.store.replace_promotions(
+        "workbuddy",
+        {
+        "paid-model": [
+            {
+            "label": "限时折扣",
+            "color": None,
+            "factor": 0.5,
+            "priority": 0,
+            "active_only": False,
+            "schedule": None,
+            "text_zh": "",
+            "text_en": "",
+            }
+        ]
+        },
+    )
     return client, auth, service
 
 
 def test_empty_stream_is_a_failure_and_cools_the_model(tmp_path, monkeypatch):
     client, auth, service = _stream_service(tmp_path, monkeypatch)
+    service.store.set_setting("policy", {"allow_night": False})
 
     class _Bridge:
         def __init__(self):
@@ -441,6 +477,7 @@ def test_empty_stream_is_a_failure_and_cools_the_model(tmp_path, monkeypatch):
 
 def test_in_stream_quota_error_keeps_its_real_status(tmp_path, monkeypatch):
     client, auth, service = _stream_service(tmp_path, monkeypatch)
+    service.store.set_setting("policy", {"allow_night": False})
 
     class _Bridge:
         async def open_chat_stream(self, payload, headers):

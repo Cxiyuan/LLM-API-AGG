@@ -134,6 +134,7 @@ def test_router_keeps_diffusion_models_out_of_tool_requests(tmp_path):
         ],
     )
     try:
+        router.store.set_setting("policy", {"deny_full_price": False})
         intent = extract_intent(
             {
                 "model": "auto",
@@ -158,7 +159,7 @@ def test_cost_mode_orders_paid_models_by_current_multiplier(tmp_path):
             {"id": "cheaper", "credits": 0.1, "contextWindow": 100000},
         ],
     )
-    store.set_setting("policy", {"routing_mode": "cost"})
+    store.set_setting("policy", {"routing_mode": "cost", "deny_full_price": False})
     router = PoolRouter(store, WorkBuddyCatalog(store, None))
     key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
     intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
@@ -203,8 +204,10 @@ def test_auto_prefers_free_then_current_discount(tmp_path):
     key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
     intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     ranked = router._rank_models(intent, key, router.policy())
-    # Day mode: free (0) -> discounted (0.2 * 0.5 = 0.1) -> plain (0.15)
-    assert [item["model_id"] for item in ranked[:3]] == ["free-model", "discounted", "plain"]
+    # Day mode: free (0) -> discounted (0.2 * 0.5 = 0.1). The full-price
+    # "plain" model is never scheduled.
+    assert [item["model_id"] for item in ranked[:3]] == ["free-model", "discounted"]
+    assert "plain" not in {item["model_id"] for item in ranked}
     db.close()
 
 
@@ -249,6 +252,7 @@ def test_night_mode_prioritizes_night_free_then_night_discount(tmp_path):
     ranked = router._rank_models(intent, key, router.policy())
     ids = [item["model_id"] for item in ranked]
     assert ids.index("night-free") < ids.index("night-discount") < ids.index("general-free")
+    assert "plain" not in ids
     db.close()
 
 
@@ -348,4 +352,20 @@ def test_balanced_ranking_keeps_candidates_from_each_provider(tmp_path):
     intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     ranked = router._rank_models(intent, key, policy)
     assert {item["provider"] for item in ranked} == {"workbuddy", "workbuddy-i"}
+    db.close()
+
+
+def test_auto_never_calls_a_full_price_model(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    _account(store, 1, 100)
+    store.upsert_models(
+        "workbuddy", [{"id": "full-price", "credits": 0.5, "contextWindow": 100000}]
+    )
+    router = PoolRouter(store, WorkBuddyCatalog(store, None))
+    key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    with pytest.raises(PoolError) as exc:
+        router.plan(intent, key)
+    assert exc.value.code == "no_discounted_models"
     db.close()

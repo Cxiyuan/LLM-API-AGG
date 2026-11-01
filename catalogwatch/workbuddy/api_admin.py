@@ -27,6 +27,7 @@ from .router import DEFAULT_POLICY
 from .schedule import (
     DEFAULT_DAY_PRIORITY,
     DEFAULT_NIGHT_PRIORITY,
+    is_full_price,
     night_window,
     period_now,
     tier_bucket,
@@ -685,6 +686,7 @@ async def get_schedule(request: Request) -> dict:
     costs = service.catalog.list_costs()
     info = period_now(policy, costs)
     allow_night = bool(policy.get("allow_night", True))
+    deny_full = bool(policy.get("deny_full_price", True))
     models = []
     for item in costs:
         bucket = tier_bucket(item, info["period"], allow_night=allow_night)
@@ -703,6 +705,8 @@ async def get_schedule(request: Request) -> dict:
                 "night_credits": item.get("night_credits"),
                 "price_windows": item.get("price_windows") or [],
                 "bucket": bucket,
+                "full_price": is_full_price(item),
+                "eligible": (not deny_full) or (not is_full_price(item)),
             }
         )
     start, end, source = night_window(policy, costs)
@@ -718,6 +722,7 @@ async def get_schedule(request: Request) -> dict:
         "day_priority": policy.get("day_priority"),
         "night_priority": policy.get("night_priority"),
         "account_sharing": policy.get("account_sharing", "balanced"),
+        "deny_full_price": bool(policy.get("deny_full_price", True)),
         "providers": service.router.share_snapshot().get("providers", {}),
         "models": models,
     }

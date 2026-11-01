@@ -29,13 +29,13 @@ from .promotions import (
 
 DEFAULT_NIGHT_START = "23:00"
 DEFAULT_NIGHT_END = "08:00"
-DEFAULT_DAY_PRIORITY = {"free": 0, "promo": 1, "normal": 2}
+DEFAULT_DAY_PRIORITY = {"free": 0, "promo": 1, "normal": 99}
 DEFAULT_NIGHT_PRIORITY = {
     "night_free": 0,
     "night_promo": 1,
     "free": 2,
     "promo": 3,
-    "normal": 4,
+    "normal": 99,
 }
 
 _RANGE_RE = re.compile(
@@ -281,6 +281,39 @@ def reference_costs(
         "night_credits": night_applied["credits"],
         "night_free": night_applied["free"],
     }
+
+
+def is_full_price(item: dict) -> bool:
+    """True when a model would bill at its base price (or has no usable price).
+
+    Automatic scheduling is only allowed to use free models and models with a
+    currently active discount. Explicit model requests bypass this check.
+    """
+    if bool(item.get("free")):
+        return False
+    credits = item.get("credits")
+    if credits is None:
+        return True
+    try:
+        value = float(credits)
+    except (TypeError, ValueError):
+        return True
+    if value == 0:
+        return False
+    factor = item.get("promotion_factor")
+    if bool(item.get("promotion_active")) and factor is not None:
+        try:
+            if float(factor) < 1:
+                return False
+        except (TypeError, ValueError):
+            pass
+    base = item.get("base_credits")
+    try:
+        if base is not None and value < float(base):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return True
 
 
 def tier_bucket(item: dict, period: str, *, allow_night: bool = True) -> str:

@@ -17,6 +17,7 @@ from .model_filter import is_text_chat_model, is_tool_capable_model
 from .schedule import (
     DEFAULT_DAY_PRIORITY,
     DEFAULT_NIGHT_PRIORITY,
+    is_full_price,
     is_night,
     night_window,
     priority_rank,
@@ -37,6 +38,8 @@ DEFAULT_POLICY: dict[str, Any] = {
     # balanced: alternate auto tasks across active CN/INTL accounts by account
     # count; cost_first: always use the cheapest provider/model.
     "account_sharing": "balanced",
+    # Automatic scheduling must never call base-price models.
+    "deny_full_price": True,
     # One extra attempt: provider catalogs can list entries the account cannot
     # serve; a bad pick should not sink the whole alias request.
     "max_attempts": 4,
@@ -453,6 +456,17 @@ class PoolRouter:
                 "No model has a usable cost estimate under the current policy",
                 503,
             )
+
+        if bool(policy.get("deny_full_price", True)):
+            # Automatic scheduling may only use free or currently discounted
+            # models. Explicit model IDs still follow the request.
+            filtered = [item for item in filtered if not is_full_price(item)]
+            if not filtered:
+                raise PoolError(
+                    "no_discounted_models",
+                    "No free or discounted WorkBuddy model is available right now",
+                    503,
+                )
 
         priorities = policy.get("model_priority") or {}
         prefer_free = bool(policy.get("prefer_free", True))
