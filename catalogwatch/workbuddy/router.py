@@ -453,11 +453,15 @@ class PoolRouter:
                 + cost_weight * cost_score
                 + jitter_weight * jitter
             )
+            # Free first, then the current effective multiplier (promotions
+            # and night windows included). Stability/load/jitter only break
+            # cost ties; they must never override a cheaper model.
             return (
                 tier,
-                proven_rank,
-                -score,
+                effective,
                 night_rank,
+                -score,
+                proven_rank,
                 -quality,
                 model_id,
                 provider,

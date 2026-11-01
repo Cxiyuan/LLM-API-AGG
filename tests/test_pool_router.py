@@ -165,3 +165,43 @@ def test_cost_mode_orders_paid_models_by_current_multiplier(tmp_path):
     attempts = router.plan(intent, key)
     assert attempts[0].model_id == "cheaper"
     db.close()
+
+
+def test_auto_prefers_free_then_current_discount(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    _account(store, 1, 100)
+    _account(store, 2, 100)
+    _account(store, 3, 100)
+    store.upsert_models(
+        "workbuddy",
+        [
+            {"id": "free-model", "credits": 0.0, "contextWindow": 100000},
+            {"id": "discounted", "credits": 0.2, "contextWindow": 100000},
+            {"id": "plain", "credits": 0.15, "contextWindow": 100000},
+        ],
+    )
+    store.replace_promotions(
+        "workbuddy",
+        {
+            "discounted": [
+                {
+                    "label": "限时折扣",
+                    "color": None,
+                    "factor": 0.5,
+                    "priority": 0,
+                    "active_only": False,
+                    "schedule": None,
+                    "text_zh": "",
+                    "text_en": "",
+                }
+            ]
+        },
+    )
+    router = PoolRouter(store, WorkBuddyCatalog(store, None))
+    key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    ranked = router._rank_models(intent, key, router.policy())
+    # free (0) -> discounted (0.2 * 0.5 = 0.1) -> plain (0.15)
+    assert [item["model_id"] for item in ranked[:3]] == ["free-model", "discounted", "plain"]
+    db.close()
