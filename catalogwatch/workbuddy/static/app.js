@@ -137,6 +137,52 @@
     }
   }
 
+  async function runAccountCheckin(accountId, reload, button) {
+    const original = button ? button.textContent : "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "签到中…";
+    }
+    try {
+      const result = await api(`/api/workbuddy/accounts/${accountId}/checkin`, { method: "POST" });
+      if (result.claimed) {
+        alert("签到成功" + (result.message ? "：" + result.message : "") + (result.credit ? "（+" + result.credit + " 积分）" : ""));
+      } else if (result.already_claimed || result.today_checked_in) {
+        alert("今日已签到");
+      } else {
+        alert("签到未完成：" + (result.message || "活动当前不可用"));
+      }
+      if (reload) await reload();
+    } catch (error) {
+      alert(error.message || String(error));
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = original;
+      }
+    }
+  }
+
+  async function runAllCheckins(reload, button) {
+    const original = button ? button.textContent : "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "签到中…";
+    }
+    try {
+      const result = await api("/api/workbuddy/checkin/run", { method: "POST" });
+      alert("全部签到完成：成功 " + (result.claimed || 0) + " / 共 " + (result.total || 0));
+      if (reload) await reload();
+    } catch (error) {
+      alert(error.message || String(error));
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = original;
+      }
+    }
+  }
+
   // ------------------------------------------------------------------ overview
 
   async function loadOverview() {
@@ -198,7 +244,7 @@
       el("button", { class: "primary", text: "添加账号", onclick: () => startLogin(realm.value, flow) }),
       el("button", { text: "同步账号", onclick: () => action("/api/workbuddy/accounts/sync", { method: "POST" }, loadAccounts) }),
       el("button", { text: "刷新积分", onclick: () => action("/api/workbuddy/credits/refresh", { method: "POST" }, loadAccounts) }),
-      el("button", { text: "全部签到", onclick: () => action("/api/workbuddy/checkin/run", { method: "POST" }, loadAccounts) })
+      el("button", { text: "全部签到", onclick: (event) => runAllCheckins(loadAccounts, event.currentTarget) })
     );
 
     const rows = items.map((account) => {
@@ -209,11 +255,16 @@
       const cooldown = stateData.cooldown_until || stateData.free_exhausted_until;
       const ci = (checkinById[id] || {}).checkin || {};
       const checked = Boolean(ci.checked_today);
+      const lastMessage = checked ? "" : ((ci.state || {}).last_message || "");
       const checkinCell = el(
         "div",
         {},
         badge(checked ? "已签到" : (ci.ok === false ? "检查失败" : "未签到"), checked ? "free" : (ci.ok === false ? "bad" : "warn")),
-        checked ? null : el("button", { text: "签到", onclick: () => action(`/api/workbuddy/accounts/${id}/checkin`, { method: "POST" }, loadAccounts) })
+        lastMessage ? el("div", { class: "muted", text: lastMessage }) : null,
+        checked ? null : el("button", {
+          text: "签到",
+          onclick: (event) => runAccountCheckin(id, loadAccounts, event.currentTarget),
+        })
       );
       return [
         el("div", {}, el("strong", { text: account.nickname || account.name || ("#" + id) }), el("div", { class: "muted", text: "ID " + id + " · " + (account.provider || "") })),
@@ -497,10 +548,13 @@
       const effective = (isOverride ? "单独" : "全局") + " " + String(rule.hour ?? 0).padStart(2, "0") + ":" + String(rule.minute ?? 0).padStart(2, "0");
       const statusText = checked ? "已签到" : (ci.ok === false ? "检查失败" : "未签到");
       const statusCls = checked ? "free" : (ci.ok === false ? "bad" : "warn");
+      const statusMessage = checked
+        ? (ci.message || "")
+        : ((ci.state || {}).last_message || ci.message || "");
       const run = el("button", {
         text: "立即签到",
         disabled: checked,
-        onclick: () => action(`/api/workbuddy/accounts/${id}/checkin`, { method: "POST" }, loadCheckin),
+        onclick: (event) => runAccountCheckin(id, loadCheckin, event.currentTarget),
       });
 
       return [
@@ -513,7 +567,7 @@
         hour,
         minute,
         saveRule,
-        el("div", {}, badge(statusText, statusCls), el("div", { class: "muted", text: ci.message || "" })),
+        el("div", {}, badge(statusText, statusCls), el("div", { class: "muted", text: statusMessage })),
         run,
       ];
     });
@@ -533,7 +587,7 @@
           ),
           el("div", { class: "toolbar" },
             saveGlobal,
-            el("button", { text: "立即全部签到", onclick: () => action("/api/workbuddy/checkin/run", { method: "POST" }, loadCheckin) })
+            el("button", { text: "立即全部签到", onclick: (event) => runAllCheckins(loadCheckin, event.currentTarget) })
           )
         ),
         card(
