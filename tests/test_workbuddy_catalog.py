@@ -146,8 +146,8 @@ async def test_realm_without_account_is_skipped_without_warning(tmp_path):
     results = await catalog.refresh()
     by_provider = {item["provider"]: item for item in results}
 
-    # Only the realm with an account is probed.
-    assert bridge.config_calls == ["workbuddy"]
+    # Only the realm with an account is probed; current then both fallbacks.
+    assert bridge.config_calls == ["workbuddy", "workbuddy", "workbuddy"]
     intl = by_provider["workbuddy-i"]
     assert intl["skipped"] == "no_account"
     assert intl["warning"] is None
@@ -156,4 +156,70 @@ async def test_realm_without_account_is_skipped_without_warning(tmp_path):
     cn = store.latest_config_snapshot("workbuddy")
     assert cn is not None
     assert cn["warning"] == "promotions_unavailable"
+    db.close()
+
+
+class _PromoBridge(_FakeCatalogBridge):
+    """Promotions are only exposed under the desktop compatibility identity."""
+
+    async def workbuddy_config(
+        self, provider: str = "workbuddy", identity: str = "current", force: bool = False
+    ) -> dict:
+        self.config_calls.append(identity)
+        if identity == "desktop":
+            return {
+                "models": [],
+                "promotions_available": True,
+                "identity_used": "desktop",
+                "account_id": 1,
+                "modelPromotions": [
+                    {
+                        "enabled": True,
+                        "id": "glm-52-night",
+                        "kind": "discount",
+                        "modelIds": ["glm-5.2"],
+                        "badge": {"label": "夜间折扣"},
+                        "priority": 100,
+                        "discount": {"factor": 0.5, "discountedCredits": "0.50x"},
+                        "schedule": {
+                            "daily": [{"start": "23:00", "end": "08:00"}],
+                            "timezone": "Asia/Shanghai",
+                        },
+                    }
+                ],
+            }
+        return {
+            "models": [],
+            "promotions_available": False,
+            "identity_used": identity,
+            "account_id": 1,
+        }
+
+
+async def test_catalog_falls_back_to_desktop_for_promotions(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    store.upsert_account(
+        {
+            "id": 1,
+            "provider": "workbuddy",
+            "name": "cn",
+            "status": "active",
+            "weight": 1,
+            "priority": 0,
+        }
+    )
+    bridge = _PromoBridge(
+        [{"id": "glm-5.2", "channel": "workbuddy", "name": "GLM-5.2", "credits": 0.79}]
+    )
+    catalog = WorkBuddyCatalog(store, bridge, providers=("workbuddy",))
+    result = await catalog.refresh()
+
+    assert result[0]["promotions"] == 1
+    assert result[0]["warning"] is None
+    rules = store.get_promotions("workbuddy", "glm-5.2")
+    assert rules and rules[0]["factor"] == 0.5
+    snapshot = store.latest_config_snapshot("workbuddy")
+    assert snapshot["identity"] == "desktop"
+    assert "desktop" in bridge.config_calls
     db.close()

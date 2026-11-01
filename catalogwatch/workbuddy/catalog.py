@@ -134,6 +134,24 @@ class WorkBuddyCatalog:
                 )
             except BridgeError as exc:
                 config_error = f"config: HTTP {exc.status_code}: {exc}"[:300]
+            # The current login identity often returns models but no promotions
+            # (the WorkBuddy UI/desktop client carries the promotion schedule).
+            # Probe the compatibility identities before giving up, otherwise
+            # night discounts/free windows never reach the router.
+            if config is not None and not config.get("promotions_available"):
+                for fallback in ("desktop", "vscode"):
+                    if fallback == identity:
+                        continue
+                    try:
+                        candidate = await self.bridge.workbuddy_config(
+                            provider, identity=fallback, force=force
+                        )
+                    except BridgeError:
+                        continue
+                    if candidate and candidate.get("promotions_available"):
+                        config = candidate
+                        config_error = None
+                        break
 
         if served:
             by_id = {}
