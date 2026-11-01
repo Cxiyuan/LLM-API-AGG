@@ -368,16 +368,21 @@
               })
             : null,
           el("p", { text: "在浏览器打开下面的地址完成授权。每次添加账号都会强制重新登录，可扫码或切换成要新增的账号：" }),
-          el(
-            "p",
-            {},
-            el("a", {
-              href: started.url || "#",
-              target: "_blank",
-              rel: "noopener noreferrer",
-              text: "打开 WorkBuddy 授权页面",
-            })
-          ),
+          requiresIncognito
+            ? el("p", {
+                class: "warn",
+                text: "不要在当前窗口直接打开；复制链接后粘贴到无痕/隐私窗口，才能登录另一个国际版账号。",
+              })
+            : el(
+                "p",
+                {},
+                el("a", {
+                  href: started.url || "#",
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                  text: "打开 WorkBuddy 授权页面",
+                })
+              ),
           el("pre", {}, started.url || "(no url)"),
           requiresIncognito ? copy : null,
           el("p", { class: "muted", text: "等待授权中…" })
