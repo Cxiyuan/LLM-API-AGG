@@ -137,3 +137,111 @@ def test_checkin_rules_and_overview_api(tmp_path, monkeypatch):
         overview = client.get("/api/workbuddy/checkin").json()
         assert overview["accounts"][0]["rule"]["source"] == "global"
         assert overview["accounts"][0]["rule"]["hour"] == 9
+
+
+def test_scheduling_policy_and_schedule_api(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
+    monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BUDDY2API_URL", "http://127.0.0.1:1")
+
+    app = create_app(_settings(tmp_path))
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin"}
+        )
+        assert login.status_code == 200
+        csrf = {"X-CSRF-Token": client.cookies.get("cw_csrf") or ""}
+        service = app.state.workbuddy
+        service.store.upsert_account(
+            {"id": 1, "provider": "workbuddy", "name": "cn", "status": "active"}
+        )
+        service.store.upsert_models(
+            "workbuddy",
+            [
+                {"id": "free-model", "credits": 0.0, "contextWindow": 100000},
+                {"id": "paid-model", "credits": 0.2, "contextWindow": 100000},
+            ],
+        )
+        service.store.replace_promotions(
+            "workbuddy",
+            {
+                "paid-model": [
+                    {
+                        "label": "夜间折扣",
+                        "color": None,
+                        "factor": 0.5,
+                        "priority": 0,
+                        "active_only": False,
+                        "schedule": {
+                            "timezone": "Asia/Shanghai",
+                            "daily": [{"start": "00:00", "end": "23:59"}],
+                        },
+                        "text_zh": "",
+                        "text_en": "",
+                    }
+                ]
+            },
+        )
+
+        saved = client.put(
+            "/api/policy",
+            headers=csrf,
+            json={
+                "night_auto": False,
+                "night_start": "22:00",
+                "night_end": "08:00",
+                "day_priority": {"free": 0, "promo": 1, "normal": 2},
+                "night_priority": {
+                    "night_free": 0,
+                    "night_promo": 1,
+                    "free": 2,
+                    "promo": 3,
+                    "normal": 4,
+                },
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        policy = saved.json()["policy"]
+        assert policy["night_start"] == "22:00"
+        assert policy["night_priority"]["night_promo"] == 1
+
+        schedule = client.get("/api/schedule")
+        assert schedule.status_code == 200
+        payload = schedule.json()
+        assert payload["night_window"]["start"] == "22:00"
+        assert payload["night_window"]["end"] == "08:00"
+        assert payload["night_window"]["source"] == "manual"
+        model = next(
+            item for item in payload["models"] if item["model_id"] == "paid-model"
+        )
+        assert model["night_credits"] == 0.1
+        assert model["day_credits"] == 0.1
+
+        bad = client.put(
+            "/api/policy",
+            headers=csrf,
+            json={"night_priority": {"unknown": 0}},
+        )
+        assert bad.status_code == 400
+        bad_time = client.put(
+            "/api/policy", headers=csrf, json={"night_start": "25:99"}
+        )
+        assert bad_time.status_code == 400
+
+        async def fake_login(realm: str) -> dict:
+            return {
+                "ok": True,
+                "url": "https://www.workbuddy.ai/login?state=test",
+                "state": "test",
+                "realm": realm,
+                "requires_incognito": realm == "global",
+            }
+
+        service.accounts.login_start = fake_login  # type: ignore[method-assign]
+        global_link = client.post(
+            "/api/workbuddy/login/start", headers=csrf, json={"realm": "global"}
+        )
+        assert global_link.status_code == 200
+        assert global_link.json()["requires_incognito"] is True

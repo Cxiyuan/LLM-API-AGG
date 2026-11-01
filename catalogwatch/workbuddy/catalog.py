@@ -19,11 +19,11 @@ from .bridge import BridgeError, BuddyBridge
 from .model_filter import is_text_chat_model
 from .promotions import (
     DEFAULT_TIMEZONE,
-    apply_promotion,
     group_promotions,
     manual_rule,
     parse_credits,
 )
+from .schedule import evaluate, reference_costs, rule_is_night
 from .store import WorkBuddyStore, _loads
 
 log = logging.getLogger(__name__)
@@ -289,7 +289,23 @@ class WorkBuddyCatalog:
             if manual.get("base_credits") is not None or factor is not None:
                 source = "manual"
 
-        applied = apply_promotion(base, promotions, now)
+        applied = evaluate(base, promotions, now)
+        promotions = applied.get("promotions") or promotions
+        reference = reference_costs(base, promotions, now)
+        price_windows = []
+        for rule in promotions:
+            if not isinstance(rule, dict):
+                continue
+            price_windows.append(
+                {
+                    "label": rule.get("label"),
+                    "factor": rule.get("factor"),
+                    "schedule": rule.get("schedule"),
+                    "text_zh": rule.get("text_zh"),
+                    "text_en": rule.get("text_en"),
+                    "night": rule_is_night(rule),
+                }
+            )
         return {
             "provider": provider,
             "model_id": model_id,
@@ -307,6 +323,13 @@ class WorkBuddyCatalog:
             "promotion_until": applied["promotion_until"],
             "promotion_text_zh": applied["promotion_text_zh"],
             "promotion_text_en": applied["promotion_text_en"],
+            "promotion_label": applied.get("promotion_label"),
+            "night_specific": applied.get("night_specific", False),
+            "day_credits": reference["day_credits"],
+            "day_free": reference["day_free"],
+            "night_credits": reference["night_credits"],
+            "night_free": reference["night_free"],
+            "price_windows": price_windows,
             "cost_source": source,
             "promotions": promotions,
             "present": bool(model.get("present", 1)),

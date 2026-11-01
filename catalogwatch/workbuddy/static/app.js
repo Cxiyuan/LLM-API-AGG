@@ -306,7 +306,10 @@
       el(
         "div",
         {},
-        card("账号管理", toolbar, flow, items.length ? table(["账号", "状态", "可用积分", "30天到期", "今日用量", "冷却", "签到", "操作"], rows) : el("p", { class: "muted", text: "还没有账号。选择区域后点“添加账号”，在浏览器完成 WorkBuddy 授权。" })),
+        card("账号管理", toolbar, el("p", {
+          class: "muted",
+          text: "国际版添加账号时，如果浏览器已登录 workbuddy.ai，普通窗口会复用该会话；请点“添加账号”后复制授权链接到无痕/隐私窗口打开。",
+        }), flow, items.length ? table(["账号", "状态", "可用积分", "30天到期", "今日用量", "冷却", "签到", "操作"], rows) : el("p", { class: "muted", text: "还没有账号。选择区域后点“添加账号”，在浏览器完成 WorkBuddy 授权。" })),
         card("说明", el("p", { class: "muted", text: "账号 token 只保存在 Buddy2api 的加密数据库里；本控制台只保存账号 ID、额度快照和用量。" }))
       )
     );
@@ -341,10 +344,29 @@
         method: "POST",
         body: JSON.stringify({ realm }),
       });
+      const requiresIncognito = Boolean(started.requires_incognito) || realm === "global";
+      const copy = el("button", {
+        text: "复制授权链接",
+        onclick: async () => {
+          try {
+            await navigator.clipboard.writeText(started.url || "");
+            alert("已复制。请粘贴到无痕/隐私窗口打开。");
+          } catch (error) {
+            window.prompt("复制下面的授权链接，然后粘贴到无痕窗口打开：", started.url || "");
+          }
+        },
+      });
       flow.append(
         el(
           "div",
           { class: "card" },
+          requiresIncognito
+            ? el("p", {
+                class: "warn",
+                text: started.note
+                  || "国际版会复用浏览器中已登录的 workbuddy.ai 会话。请复制链接到无痕/隐私窗口打开，否则会再次绑定已有账号。",
+              })
+            : null,
           el("p", { text: "在浏览器打开下面的地址完成授权。每次添加账号都会强制重新登录，可扫码或切换成要新增的账号：" }),
           el(
             "p",
@@ -357,6 +379,7 @@
             })
           ),
           el("pre", {}, started.url || "(no url)"),
+          requiresIncognito ? copy : null,
           el("p", { class: "muted", text: "等待授权中…" })
         )
       );
@@ -365,7 +388,21 @@
           const result = await api("/api/workbuddy/login/poll?state=" + encodeURIComponent(started.state));
           if (result.done) {
             clearInterval(timer);
-            flow.append(el("p", { class: "ok", text: "登录成功：" + (result.nickname || "") }));
+            if (result.updated) {
+              flow.append(
+                el("p", {
+                  class: "warn",
+                  text: "这次授权返回的是已有账号 "
+                    + (result.nickname || "")
+                    + "（ID "
+                    + (result.id ?? "?")
+                    + "），没有新增账号。"
+                    + (requiresIncognito ? "请复制上面的链接到无痕窗口重新打开，并在其中登录另一个账号。" : ""),
+                })
+              );
+            } else {
+              flow.append(el("p", { class: "ok", text: "登录成功：" + (result.nickname || "") }));
+            }
             await loadAccounts();
           }
         } catch (error) {
@@ -699,7 +736,10 @@
   // -------------------------------------------------------------------- policy
 
   async function loadPolicy() {
-    const policy = await api("/api/policy");
+    const [policy, schedule] = await Promise.all([
+      api("/api/policy"),
+      api("/api/schedule").catch(() => null),
+    ]);
     const fields = {};
     const make = (key, type, label) => {
       let input;
@@ -712,9 +752,79 @@
       fields[key] = input;
       return el("label", { class: "field" }, label, input);
     };
+    const bucketLabel = {
+      free: "免费模型",
+      promo: "折扣模型",
+      normal: "原价模型",
+      night_free: "夜间免费",
+      night_promo: "夜间折扣",
+    };
+    const rankInput = (bucket, value) => {
+      const input = el("input", { type: "number", min: "0", max: "99", value: String(value ?? 0) });
+      return { bucket, input };
+    };
+    const dayDefaults = policy.day_priority || { free: 0, promo: 1, normal: 2 };
+    const nightDefaults = policy.night_priority || {
+      night_free: 0, night_promo: 1, free: 2, promo: 3, normal: 4,
+    };
+    const dayRanks = ["free", "promo", "normal"].map((bucket) => rankInput(bucket, dayDefaults[bucket]));
+    const nightRanks = ["night_free", "night_promo", "free", "promo", "normal"].map(
+      (bucket) => rankInput(bucket, nightDefaults[bucket])
+    );
+    const nightAuto = el("input", { type: "checkbox" });
+    nightAuto.checked = policy.night_auto !== false;
+    const nightStart = el("input", { type: "text", value: policy.night_start || "23:00" });
+    const nightEnd = el("input", { type: "text", value: policy.night_end || "08:00" });
+    const period = schedule
+      ? (schedule.period === "night" ? "夜间模式" : "白天模式")
+      : "未知";
+    const windowText = schedule
+      ? schedule.night_window.start + "–" + schedule.night_window.end
+        + "（" + (schedule.night_window.source === "auto" ? "自动跟随模型促销" : "手动设置") + "）"
+      : "—";
+    const rankRow = (items) =>
+      el(
+        "div",
+        { class: "form-grid" },
+        ...items.map((item) =>
+          el("label", { class: "field" }, bucketLabel[item.bucket] + " 优先级（越小越优先）", item.input)
+        )
+      );
+    const modelRows = (schedule && schedule.models ? schedule.models : []).map((item) => [
+      el("div", {}, el("strong", { text: item.model_id }), el("div", { class: "muted", text: item.provider || "" })),
+      num(item.credits),
+      num(item.day_credits),
+      num(item.night_credits),
+      item.free ? "免费" : item.promotion_active ? "折扣 " + fmt(item.promotion_factor) : "原价",
+      item.night_specific ? "夜间专属" : "—",
+      bucketLabel[item.bucket] || item.bucket || "—",
+    ]);
+
     setView(
       card(
         "调度策略",
+        el("p", {
+          class: "muted",
+          text: "全局生效：所有 WorkBuddy 账号的自动选路都按这里的白天/夜间优先级执行。"
+            + " 当前时段：" + period + "；夜间时段 " + windowText + "。",
+        }),
+        el(
+          "div",
+          { class: "form-grid" },
+          el("label", { class: "field" }, "自动识别夜间时段", nightAuto),
+          el("label", { class: "field" }, "夜间开始（HH:MM）", nightStart),
+          el("label", { class: "field" }, "夜间结束（HH:MM）", nightEnd)
+        ),
+        el("h3", {}, "白天优先级"),
+        rankRow(dayRanks),
+        el("h3", {}, "夜间优先级"),
+        rankRow(nightRanks),
+        el("p", {
+          class: "muted",
+          text: "夜间顺序默认：夜间免费 > 夜间折扣 > 通用免费 > 普通折扣 > 原价。"
+            + "白天顺序默认：免费 > 折扣 > 原价。夜间时段会自动从模型促销窗口推导，也可关闭自动识别后手动设置。",
+        }),
+        el("h3", {}, "基础路由参数"),
         el(
           "div",
           { class: "form-grid" },
@@ -739,7 +849,15 @@
           class: "primary",
           text: "保存策略",
           onclick: async () => {
-            const body = {};
+            const body = {
+              night_auto: nightAuto.checked,
+              night_start: nightStart.value.trim(),
+              night_end: nightEnd.value.trim(),
+              day_priority: {},
+              night_priority: {},
+            };
+            for (const item of dayRanks) body.day_priority[item.bucket] = Number(item.input.value || 0);
+            for (const item of nightRanks) body.night_priority[item.bucket] = Number(item.input.value || 0);
             for (const [key, input] of Object.entries(fields)) {
               if (input.type === "checkbox") body[key] = input.checked;
               else if (input.type === "number") body[key] = Number(input.value || 0);
@@ -752,7 +870,11 @@
               alert(error.message || String(error));
             }
           },
-        })
+        }),
+        el("h3", {}, "当前模型计价（白天/夜间参考）"),
+        modelRows.length
+          ? table(["模型", "当前价", "白天参考", "夜间参考", "状态", "夜间专属", "当前档位"], modelRows)
+          : el("p", { class: "muted", text: "暂无模型数据。" })
       )
     );
   }

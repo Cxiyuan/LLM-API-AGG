@@ -198,12 +198,57 @@ def test_auto_prefers_free_then_current_discount(tmp_path):
             ]
         },
     )
+    store.set_setting("policy", {"allow_night": False})
     router = PoolRouter(store, WorkBuddyCatalog(store, None))
     key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
     intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     ranked = router._rank_models(intent, key, router.policy())
-    # free (0) -> discounted (0.2 * 0.5 = 0.1) -> plain (0.15)
+    # Day mode: free (0) -> discounted (0.2 * 0.5 = 0.1) -> plain (0.15)
     assert [item["model_id"] for item in ranked[:3]] == ["free-model", "discounted", "plain"]
+    db.close()
+
+
+def test_night_mode_prioritizes_night_free_then_night_discount(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    _account(store, 1, 100)
+    store.upsert_models(
+        "workbuddy",
+        [
+            {"id": "night-free", "credits": 0.0, "contextWindow": 100000},
+            {"id": "general-free", "credits": 0.0, "contextWindow": 100000},
+            {"id": "night-discount", "credits": 0.2, "contextWindow": 100000},
+            {"id": "plain", "credits": 0.15, "contextWindow": 100000},
+        ],
+    )
+    night = {
+        "color": None,
+        "priority": 0,
+        "active_only": False,
+        "schedule": {
+            "timezone": "Asia/Shanghai",
+            "daily": [{"start": "00:00", "end": "23:59"}],
+        },
+        "text_zh": "",
+        "text_en": "",
+    }
+    store.replace_promotions(
+        "workbuddy",
+        {
+            "night-free": [{**night, "label": "夜间免费", "factor": 0.0}],
+            "night-discount": [{**night, "label": "夜间折扣", "factor": 0.5}],
+        },
+    )
+    store.set_setting(
+        "policy",
+        {"night_auto": False, "night_start": "00:00", "night_end": "23:59"},
+    )
+    router = PoolRouter(store, WorkBuddyCatalog(store, None))
+    key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    ranked = router._rank_models(intent, key, router.policy())
+    ids = [item["model_id"] for item in ranked]
+    assert ids.index("night-free") < ids.index("night-discount") < ids.index("general-free")
     db.close()
 
 

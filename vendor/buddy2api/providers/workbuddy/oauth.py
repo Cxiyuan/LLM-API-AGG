@@ -189,7 +189,22 @@ async def start_login(realm: str) -> dict:
     with _lock:
         _purge_locked()
         _sessions[state] = {"created": time.time(), "realm": selected, "result": None}
-    return {"ok": True, "url": safe_url, "state": state, "realm": selected}
+    return {
+        "ok": True,
+        "url": safe_url,
+        "state": state,
+        "realm": selected,
+        # The INTL login page is session-cookie driven: if the browser already
+        # has a workbuddy.ai session it silently authorizes that same account.
+        # There is no upstream URL parameter to force a fresh login, so the
+        # console must tell the operator to use a private/incognito window.
+        "requires_incognito": selected == "global",
+        "note": (
+            "国际版会复用浏览器中已登录的 workbuddy.ai 会话。请把链接复制到无痕/隐私窗口打开，否则会再次绑定已有账号。"
+            if selected == "global"
+            else ""
+        ),
+    }
 
 
 async def poll_login(state: str) -> dict:

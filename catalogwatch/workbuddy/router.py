@@ -13,6 +13,13 @@ from ..util import utcnow_iso
 from .catalog import WorkBuddyCatalog
 from .load import LoadTracker
 from .model_filter import is_text_chat_model, is_tool_capable_model
+from .schedule import (
+    DEFAULT_DAY_PRIORITY,
+    DEFAULT_NIGHT_PRIORITY,
+    is_night,
+    night_window,
+    priority_rank,
+)
 from .store import WorkBuddyStore
 
 ALIASES = {"auto", "free", "cheap"}
@@ -38,6 +45,11 @@ DEFAULT_POLICY: dict[str, Any] = {
     "cost_weight": 0.2,
     "session_jitter": 0.1,
     "session_ttl_seconds": 1800,
+    "night_auto": True,
+    "night_start": "23:00",
+    "night_end": "08:00",
+    "day_priority": dict(DEFAULT_DAY_PRIORITY),
+    "night_priority": dict(DEFAULT_NIGHT_PRIORITY),
     "model_priority": {},
     "allow_models": [],
     "deny_models": [],
@@ -387,12 +399,25 @@ class PoolRouter:
             cost_weight = 0.0
 
         proven = self._proven_models()
+        window_start, window_end, _window_source = night_window(policy, costs)
+        current_period = (
+            "night"
+            if allow_night
+            and is_night(datetime.now(timezone.utc), window_start, window_end)
+            else "day"
+        )
 
         def key_for(item: dict):
             credits = item.get("credits")
             effective = float(credits) if credits is not None else math.inf
-            free_now = bool(item.get("free") and prefer_free)
-            tier = 0 if free_now else (1 if credits is not None else 2)
+            if intent.model == "cheap":
+                # `cheap` is the explicit lowest-multiplier alias; it must not
+                # be reordered by the day/night priority map.
+                tier = 0
+            else:
+                tier = priority_rank(
+                    item, current_period, policy, allow_night=allow_night
+                )
             # Within a cost tier, prefer models that have actually answered
             # recently; provider catalogs list entries the account cannot use.
             proven_rank = (

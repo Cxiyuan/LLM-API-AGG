@@ -22,7 +22,15 @@ from .auth import (
     require_admin,
     set_session_cookies,
 )
+from .promotions import parse_clock_minutes
 from .router import DEFAULT_POLICY
+from .schedule import (
+    DEFAULT_DAY_PRIORITY,
+    DEFAULT_NIGHT_PRIORITY,
+    night_window,
+    period_now,
+    tier_bucket,
+)
 from .service import WorkBuddyService
 
 router = APIRouter(prefix="/api")
@@ -573,24 +581,67 @@ async def request_detail(request: Request, request_id: str) -> dict:
 
 # -------------------------------------------------------------------- policy
 
-@router.get("/policy")
-async def get_policy(request: Request) -> dict:
-    service, _actor = _admin(request)
+_PRIORITY_DEFAULTS = {
+    "day_priority": DEFAULT_DAY_PRIORITY,
+    "night_priority": DEFAULT_NIGHT_PRIORITY,
+}
+
+
+def _merged_policy(service: WorkBuddyService) -> dict:
     merged = dict(DEFAULT_POLICY)
     value = service.store.get_setting("policy", {})
     if isinstance(value, dict):
         merged.update(value)
+    for key, defaults in _PRIORITY_DEFAULTS.items():
+        normalized = dict(defaults)
+        configured = merged.get(key)
+        if isinstance(configured, dict):
+            for bucket, rank in configured.items():
+                if str(bucket) in defaults:
+                    try:
+                        normalized[str(bucket)] = int(rank)
+                    except (TypeError, ValueError):
+                        continue
+        merged[key] = normalized
+    for key, fallback in (("night_start", "23:00"), ("night_end", "08:00")):
+        if parse_clock_minutes(merged.get(key)) is None:
+            merged[key] = fallback
     return merged
+
+
+@router.get("/policy")
+async def get_policy(request: Request) -> dict:
+    service, _actor = _admin(request)
+    return _merged_policy(service)
 
 
 @router.put("/policy")
 async def update_policy(request: Request) -> dict:
     service, actor = _admin(request, mutation=True)
     body = await _body(request)
-    merged = dict(DEFAULT_POLICY)
-    current = service.store.get_setting("policy", {})
-    if isinstance(current, dict):
-        merged.update(current)
+    for key, defaults in _PRIORITY_DEFAULTS.items():
+        if key in body:
+            value = body[key]
+            if not isinstance(value, dict):
+                raise HTTPException(status_code=400, detail=f"{key} must be an object")
+            unknown = {str(bucket) for bucket in value} - set(defaults)
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} has unknown buckets: {', '.join(sorted(unknown))}",
+                )
+            for bucket, rank in value.items():
+                try:
+                    int(rank)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{key}.{bucket} must be an integer",
+                    ) from exc
+    for key in ("night_start", "night_end"):
+        if key in body and parse_clock_minutes(body[key]) is None:
+            raise HTTPException(status_code=400, detail=f"{key} must be HH:MM")
+    merged = _merged_policy(service)
     for key, value in body.items():
         if key in DEFAULT_POLICY:
             merged[key] = value
@@ -599,9 +650,67 @@ async def update_policy(request: Request) -> dict:
             status_code=400,
             detail="routing_mode must be balanced, stable, or cost",
         )
+    merged = _merged_policy_for_update(merged)
     service.store.set_setting("policy", merged)
     _audit(service, actor, "policy.update", None, merged)
     return {"ok": True, "policy": merged}
+
+
+def _merged_policy_for_update(policy: dict) -> dict:
+    """Normalize nested priority maps after validating the submitted body."""
+    result = dict(policy)
+    for key, defaults in _PRIORITY_DEFAULTS.items():
+        normalized = dict(defaults)
+        configured = policy.get(key)
+        if isinstance(configured, dict):
+            for bucket, rank in configured.items():
+                if str(bucket) in defaults:
+                    normalized[str(bucket)] = int(rank)
+        result[key] = normalized
+    return result
+
+
+@router.get("/schedule")
+async def get_schedule(request: Request) -> dict:
+    service, _actor = _admin(request)
+    policy = _merged_policy(service)
+    costs = service.catalog.list_costs()
+    info = period_now(policy, costs)
+    allow_night = bool(policy.get("allow_night", True))
+    models = []
+    for item in costs:
+        bucket = tier_bucket(item, info["period"], allow_night=allow_night)
+        models.append(
+            {
+                "provider": item.get("provider"),
+                "model_id": item.get("model_id"),
+                "name": item.get("name"),
+                "credits": item.get("credits"),
+                "free": bool(item.get("free")),
+                "promotion_active": bool(item.get("promotion_active")),
+                "promotion_factor": item.get("promotion_factor"),
+                "promotion_label": item.get("promotion_label"),
+                "night_specific": bool(item.get("night_specific")),
+                "day_credits": item.get("day_credits"),
+                "night_credits": item.get("night_credits"),
+                "price_windows": item.get("price_windows") or [],
+                "bucket": bucket,
+            }
+        )
+    start, end, source = night_window(policy, costs)
+    return {
+        "now": utcnow_iso(),
+        "timezone": "Asia/Shanghai",
+        "period": info["period"],
+        "night_window": {
+            "start": f"{start // 60:02d}:{start % 60:02d}",
+            "end": f"{end // 60:02d}:{end % 60:02d}",
+            "source": source,
+        },
+        "day_priority": policy.get("day_priority"),
+        "night_priority": policy.get("night_priority"),
+        "models": models,
+    }
 
 
 # ----------------------------------------------------------------- settings
