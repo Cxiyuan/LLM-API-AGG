@@ -280,7 +280,17 @@
         el(
           "div",
           { class: "card" },
-          el("p", { text: "在浏览器打开下面的地址完成授权：" }),
+          el("p", { text: "在浏览器打开下面的地址完成授权。每次添加账号都会强制重新登录，可扫码或切换成要新增的账号：" }),
+          el(
+            "p",
+            {},
+            el("a", {
+              href: started.url || "#",
+              target: "_blank",
+              rel: "noopener noreferrer",
+              text: "打开 WorkBuddy 授权页面",
+            })
+          ),
           el("pre", {}, started.url || "(no url)"),
           el("p", { class: "muted", text: "等待授权中…" })
         )
