@@ -10,7 +10,7 @@ import json
 import re
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -79,6 +79,18 @@ def accepted_auth_url(url: str) -> str:
     if parsed.scheme != "https" or not host or not allowed:
         raise ValueError(f"upstream auth URL host was rejected: {host or 'empty'}")
     return parsed.geturl()
+
+
+def force_login_url(url: str) -> str:
+    """Force the upstream login page instead of auto-authorizing the browser's
+    existing session, so adding a second account shows a fresh login/QR flow."""
+    parsed = urlsplit(url)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    if not any(key == "force_login" for key, _ in query):
+        query.append(("force_login", "1"))
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
 
 
 def _public_message(payload: dict | None, fallback: str) -> str:
@@ -173,7 +185,7 @@ async def start_login(realm: str) -> dict:
     auth_url = str(data.get("authUrl") or data.get("auth_url") or data.get("url") or "").strip()
     if status >= 300 or code not in {0, None, "0"} or not _STATE_RE.fullmatch(state):
         raise ValueError(_public_message(payload, "auth state was rejected"))
-    safe_url = accepted_auth_url(auth_url)
+    safe_url = force_login_url(accepted_auth_url(auth_url))
     with _lock:
         _purge_locked()
         _sessions[state] = {"created": time.time(), "realm": selected, "result": None}
