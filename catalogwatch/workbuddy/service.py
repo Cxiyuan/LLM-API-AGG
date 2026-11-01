@@ -105,7 +105,11 @@ class WorkBuddyService:
         today = datetime.now(self.CHECKIN_TZ).date().isoformat()
         accounts = self.store.list_accounts(present=True)
         try:
-            bridge = await self.accounts.checkin_status(force=force)
+            bridge = await asyncio.wait_for(
+                self.accounts.checkin_status(force=force), timeout=15.0
+            )
+        except asyncio.TimeoutError:
+            bridge = {"error": "check-in status timeout", "results": []}
         except Exception as exc:  # noqa: BLE001 - status is best effort
             bridge = {"error": str(exc)[:300], "results": []}
         status_by_id: dict[int, dict] = {}
