@@ -74,6 +74,31 @@ def _classify(status: int) -> str:
     return "upstream_error"
 
 
+def _error_status(error: object) -> int:
+    """HTTP-like status carried by an in-stream error event, when present."""
+    if not isinstance(error, dict):
+        return 502
+    try:
+        status = int(error.get("code"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 502
+    return status if 400 <= status <= 599 else 502
+
+
+def _account_cooling(store: WorkBuddyStore, account_id: int) -> bool:
+    state = store.get_state(account_id)
+    until = state.get("cooldown_until")
+    if not until:
+        return False
+    try:
+        moment = datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment > datetime.now(timezone.utc)
+
+
 def _cooldown(seconds: int) -> str:
     moment = datetime.now(timezone.utc) + timedelta(seconds=seconds)
     return moment.isoformat(timespec="seconds")
@@ -199,6 +224,18 @@ class PoolGateway:
             },
             routing=_routing(attempts),
         )
+
+    def _attempt_usable(self, intent: PoolIntent, attempt: Attempt) -> bool:
+        """Skip candidates that failed earlier in this same request."""
+        if intent.model in ALIASES and self.router.load.cooling(
+            attempt.provider, attempt.model_id
+        ):
+            return False
+        if attempt.account is not None and _account_cooling(
+            self.store, int(attempt.account["account_id"])
+        ):
+            return False
+        return True
 
     @staticmethod
     def _attempt_headers(attempt: Attempt, request_id: str, attempt_no: int) -> dict[str, str]:
@@ -370,7 +407,13 @@ class PoolGateway:
                     attempt.provider, attempt.model_id, 1800 if model_missing else 300
                 )
                 return
-        if code in {"stream_error", "stream_incomplete", "stream_timeout", "stream_transport"}:
+        if code in {
+            "stream_error",
+            "stream_incomplete",
+            "stream_timeout",
+            "stream_transport",
+            "empty_response",
+        }:
             # A stream that already started cannot be retried inside this
             # request. Cool the model (not the account) so the next auto pick
             # falls through to the next-cheapest model and retries the free one
@@ -476,6 +519,8 @@ class PoolGateway:
         last_error: Exception | None = None
 
         for attempt_no, attempt in enumerate(attempts, start=1):
+            if attempt_no > 1 and not self._attempt_usable(intent, attempt):
+                continue
             body = dict(payload)
             body["model"] = attempt.wire_id
             headers = self._attempt_headers(attempt, request_id, attempt_no)
@@ -594,6 +639,8 @@ class PoolGateway:
         last_error: Exception | None = None
 
         for attempt_no, attempt in enumerate(attempts, start=1):
+            if attempt_no > 1 and not self._attempt_usable(intent, attempt):
+                continue
             body = dict(payload)
             body["model"] = attempt.wire_id
             headers = self._attempt_headers(attempt, request_id, attempt_no)
@@ -732,6 +779,7 @@ class PoolGateway:
         stream_error: Any = None
         saw_done = False
         saw_finish = False
+        saw_content = False
         try:
             async for chunk in self._stream_with_heartbeat(response):
                 # Parse before yielding: a client may stop after the last content
@@ -760,9 +808,18 @@ class PoolGateway:
                     choices = value.get("choices")
                     if isinstance(choices, list):
                         for choice in choices:
-                            if isinstance(choice, dict) and choice.get("finish_reason"):
+                            if not isinstance(choice, dict):
+                                continue
+                            if choice.get("finish_reason"):
                                 saw_finish = True
                                 last_usage["finish_reason"] = choice["finish_reason"]
+                            delta = choice.get("delta")
+                            if isinstance(delta, dict) and (
+                                delta.get("content")
+                                or delta.get("reasoning_content")
+                                or delta.get("tool_calls")
+                            ):
+                                saw_content = True
                     if value.get("error"):
                         # Provider-level error delivered inside the stream. The
                         # client will see it too; record it so a 200-looking
@@ -778,8 +835,11 @@ class PoolGateway:
                 message = json.dumps(
                     stream_error, ensure_ascii=False, default=str
                 )[:500]
+                status = _error_status(stream_error)
+                code = _classify(status) if status != 502 else "stream_error"
                 log.warning(
-                    "llm-agg: stream error for %s/%s: %s",
+                    "llm-agg: stream error (%s) for %s/%s: %s",
+                    status,
                     attempt.provider,
                     attempt.model_id,
                     message,
@@ -788,16 +848,16 @@ class PoolGateway:
                     attempt=attempt,
                     request_id=request_id,
                     attempt_no=attempt_no,
-                    status_code=502,
-                    code="stream_error",
+                    status_code=status,
+                    code=code,
                     message=message,
                     latency_ms=latency,
                     session_id=session_id,
                 )
                 self.store.finish_request(
                     request_id,
-                    status_code=502,
-                    error_code="stream_error",
+                    status_code=status,
+                    error_code=code,
                     attempts=attempt_no,
                     duration_ms=latency,
                 )
@@ -827,6 +887,35 @@ class PoolGateway:
                     request_id,
                     status_code=502,
                     error_code="stream_incomplete",
+                    attempts=attempt_no,
+                    duration_ms=latency,
+                )
+                return
+            if not saw_content:
+                # The stream finished normally but carried no text, reasoning
+                # or tool call. Clients see an empty completion; recording it
+                # as success makes auto keep choosing the same dead model.
+                message = "upstream stream finished without any content"
+                log.warning(
+                    "llm-agg: %s for %s/%s",
+                    message,
+                    attempt.provider,
+                    attempt.model_id,
+                )
+                self._failure(
+                    attempt=attempt,
+                    request_id=request_id,
+                    attempt_no=attempt_no,
+                    status_code=502,
+                    code="empty_response",
+                    message=message,
+                    latency_ms=latency,
+                    session_id=session_id,
+                )
+                self.store.finish_request(
+                    request_id,
+                    status_code=502,
+                    error_code="empty_response",
                     attempts=attempt_no,
                     duration_ms=latency,
                 )

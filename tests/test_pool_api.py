@@ -312,3 +312,155 @@ def test_auto_retries_next_model_on_context_400(tmp_path, monkeypatch):
         )
         assert response.status_code == 200, response.text
         assert "workbuddy/paid-model" in bridge.models
+
+
+class _EmptyStream:
+    status_code = 200
+
+    async def aiter_bytes(self):
+        yield b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    async def aclose(self):
+        return None
+
+
+class _QuotaStream:
+    status_code = 200
+
+    async def aiter_bytes(self):
+        yield (
+            b'data: {"error":{"message":"daily quota","type":"upstream_error",'
+            b'"code":"429"}}\n\n'
+        )
+        yield b"data: [DONE]\n\n"
+
+    async def aclose(self):
+        return None
+
+
+class _ContentStream:
+    status_code = 200
+
+    async def aiter_bytes(self):
+        yield (
+            b'data: {"choices":[{"index":0,"delta":{"content":"ok"},'
+            b'"finish_reason":null}]}\n\n'
+        )
+        yield b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    async def aclose(self):
+        return None
+
+
+def _stream_service(tmp_path, monkeypatch):
+    monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
+    monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BUDDY2API_URL", "http://127.0.0.1:1")
+
+    app = create_app(_settings(tmp_path))
+    client = TestClient(app)
+    client.__enter__()
+    created = client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer test-admin-token"},
+        json={"name": "smoke", "kind": "shared", "daily_request_limit": 0},
+    )
+    auth = {"Authorization": f"Bearer {created.json()['key']}"}
+    service = app.state.workbuddy
+    service.store.upsert_account(
+        {"id": 1, "provider": "workbuddy", "name": "acct", "status": "active"}
+    )
+    service.store.record_credit_snapshot(
+        1, {"ok": True, "available_total": 100, "total_dosage": 100}
+    )
+    service.store.upsert_models(
+        "workbuddy",
+        [
+            {"id": "free-model", "credits": 0, "contextWindow": 100000},
+            {"id": "paid-model", "credits": 0.2, "contextWindow": 100000},
+        ],
+    )
+    return client, auth, service
+
+
+def test_empty_stream_is_a_failure_and_cools_the_model(tmp_path, monkeypatch):
+    client, auth, service = _stream_service(tmp_path, monkeypatch)
+
+    class _Bridge:
+        def __init__(self):
+            self.models = []
+
+        async def open_chat_stream(self, payload, headers):
+            self.models.append(payload["model"])
+            return (
+                _EmptyStream()
+                if payload["model"] == "workbuddy/free-model"
+                else _ContentStream()
+            )
+
+    bridge = _Bridge()
+    service.gateway.bridge = bridge
+    try:
+        first = client.post(
+            "/v1/chat/completions",
+            headers=auth,
+            json={
+                "model": "auto",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert first.status_code == 200
+        assert bridge.models == ["workbuddy/free-model"]
+        request = service.store.list_requests()[0]
+        assert request["status_code"] == 502
+        assert request["error_code"] == "empty_response"
+
+        # The empty free model is now cooled down, so the next auto request
+        # must fall through to the paid model instead of repeating it.
+        second = client.post(
+            "/v1/chat/completions",
+            headers=auth,
+            json={
+                "model": "auto",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert second.status_code == 200
+        assert bridge.models[-1] == "workbuddy/paid-model"
+        assert second.headers["X-Pool-Model"] == "paid-model"
+        assert "ok" in second.text
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_in_stream_quota_error_keeps_its_real_status(tmp_path, monkeypatch):
+    client, auth, service = _stream_service(tmp_path, monkeypatch)
+
+    class _Bridge:
+        async def open_chat_stream(self, payload, headers):
+            return _QuotaStream()
+
+    service.gateway.bridge = _Bridge()
+    try:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=auth,
+            json={
+                "model": "auto",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert response.status_code == 200
+        request = service.store.list_requests()[0]
+        assert request["status_code"] == 429
+        assert request["error_code"] == "rate_limit"
+    finally:
+        client.__exit__(None, None, None)
+

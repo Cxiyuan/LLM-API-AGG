@@ -942,7 +942,11 @@ async def _json_chat_with_stall_retry(
                 return last_error
             await _retry_delay(attempt)
             continue
-        auth_manager.mark_account_failure(account["id"], err_status)
+        # 400/404 are model/request-specific (context budget, missing model);
+        # do not cool the whole account, or an immediate retry with another
+        # model on the same pinned account returns "No available accounts".
+        if err_status not in {400, 404}:
+            auth_manager.mark_account_failure(account["id"], err_status)
         will_retry = _is_retryable_status(err_status) and attempt < max_retries - 1
         error_message = detail
         if isinstance(detail, dict):
