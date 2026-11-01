@@ -37,7 +37,7 @@ class BuddyBridge:
         gateway_key: str = "",
         *,
         transport: httpx.AsyncBaseTransport | None = None,
-        timeout: float = 30.0,
+        timeout: float = 300.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.admin_token = admin_token.strip()

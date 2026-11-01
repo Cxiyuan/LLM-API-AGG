@@ -32,10 +32,17 @@ def _seconds(store: WorkBuddyStore, key: str, default: int, minimum: int, maximu
 class WorkBuddyService:
     def __init__(self, db: Database):
         self.store = WorkBuddyStore(db)
+        try:
+            bridge_timeout = float(
+                os.environ.get("WORKBUDDY_BRIDGE_TIMEOUT_SECONDS", "300") or "300"
+            )
+        except ValueError:
+            bridge_timeout = 300.0
         self.bridge = BuddyBridge(
             base_url=os.environ.get("BUDDY2API_URL", "http://127.0.0.1:8787"),
             admin_token=os.environ.get("CB_GATEWAY_ADMIN_TOKEN", ""),
             gateway_key=os.environ.get("WORKBUDDY_GATEWAY_KEY", ""),
+            timeout=bridge_timeout,
         )
         self.catalog = WorkBuddyCatalog(self.store, self.bridge)
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)

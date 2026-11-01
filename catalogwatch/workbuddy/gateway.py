@@ -337,6 +337,13 @@ class PoolGateway:
             duration_ms=latency_ms,
             credits=None,
         )
+        if code in {"stream_error", "stream_incomplete", "stream_timeout", "stream_transport"}:
+            # A stream that already started cannot be retried inside this
+            # request. Cool the model (not the account) so the next auto pick
+            # falls through to the next-cheapest model and retries the free one
+            # after a short cooldown.
+            self.router.load.cooldown(attempt.provider, attempt.model_id, 120)
+            return
         if status_code == 404:
             # Model-specific unavailability: the catalog lists an entry this
             # account cannot serve ("Function ... not found"). Do not cool the

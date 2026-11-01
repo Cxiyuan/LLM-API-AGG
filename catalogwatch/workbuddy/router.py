@@ -425,10 +425,13 @@ class PoolRouter:
                 + priority
             )
             if routing_mode == "cost":
+                # Cost-first after the free tier: the current effective
+                # multiplier (promotions/night windows included) wins; recent
+                # success only breaks ties.
                 return (
                     tier,
-                    proven_rank,
                     effective,
+                    proven_rank,
                     night_rank,
                     -quality,
                     str(item.get("model_id")),

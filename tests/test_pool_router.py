@@ -145,3 +145,23 @@ def test_router_keeps_diffusion_models_out_of_tool_requests(tmp_path):
         assert [item.model_id for item in attempts] == ["tool-model"]
     finally:
         db.close()
+
+
+def test_cost_mode_orders_paid_models_by_current_multiplier(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    _account(store, 1, 100)
+    store.upsert_models(
+        "workbuddy",
+        [
+            {"id": "expensive", "credits": 0.8, "contextWindow": 100000},
+            {"id": "cheaper", "credits": 0.1, "contextWindow": 100000},
+        ],
+    )
+    store.set_setting("policy", {"routing_mode": "cost"})
+    router = PoolRouter(store, WorkBuddyCatalog(store, None))
+    key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    attempts = router.plan(intent, key)
+    assert attempts[0].model_id == "cheaper"
+    db.close()
