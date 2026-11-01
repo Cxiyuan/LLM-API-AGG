@@ -15,6 +15,8 @@ _OFF = {"0", "off", "false", "none", "no"}
 _AUTH_CODES = {12153, 14015, 11142}
 _TERMINAL_CODES = {11115, 11128, 11101, 11148, 11155}
 _ROTATE_CODES = {6000, 6001, 6002, 6003, 6004, 6005, 6006, 6007, 6008, 14003, 14017}
+# Model-scoped quota/saturation: the account is still usable for other models.
+_MODEL_RATE_CODES = {6004, 14003}
 
 _TERMINAL_CLIENT = {
     11115: ("context_length_exceeded", "请求上下文超过上游限制（11115）。换账号没有用。"),
@@ -126,6 +128,8 @@ def account_rule(status: int, detail) -> tuple[str, int, dict, str] | None:
             },
         }
         return ("stop", 400, payload, client_code)
+    if code in _MODEL_RATE_CODES:
+        return ("stop", status or 429, _detail_of(detail), "upstream_http")
     if code in _ROTATE_CODES:
         return ("rotate", status or 429, _detail_of(detail), "upstream_http")
     return None

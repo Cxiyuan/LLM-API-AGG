@@ -461,6 +461,11 @@ def test_in_stream_quota_error_keeps_its_real_status(tmp_path, monkeypatch):
         request = service.store.list_requests()[0]
         assert request["status_code"] == 429
         assert request["error_code"] == "rate_limit"
+        # A model-scoped quota 429 must not take the whole account out of
+        # rotation: another model on the same account is still usable.
+        state = service.store.get_state(1)
+        assert not state.get("cooldown_until")
+        assert service.gateway.router.load.cooling("workbuddy", "free-model")
     finally:
         client.__exit__(None, None, None)
 

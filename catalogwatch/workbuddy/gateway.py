@@ -458,7 +458,10 @@ class PoolGateway:
             threshold = int(self.router.policy().get("free_429_threshold") or 3)
             if attempt.free and count >= threshold:
                 self.store.set_free_exhausted(account_id, _next_reset())
-            self.store.set_cooldown(account_id, _cooldown(60), message)
+            # WorkBuddy's 429s are model-scoped (daily model quota / model
+            # saturation). Cool the model, not the account: another model on
+            # the same account must remain routable.
+            self.router.load.cooldown(attempt.provider, attempt.model_id, 300)
         elif status_code in {401, 403}:
             self.store.note_failure(account_id, status_code, message, cooldown_until=_cooldown(300))
         elif status_code >= 500:
