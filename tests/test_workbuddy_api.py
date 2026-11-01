@@ -213,6 +213,8 @@ def test_scheduling_policy_and_schedule_api(tmp_path, monkeypatch):
         assert payload["night_window"]["start"] == "22:00"
         assert payload["night_window"]["end"] == "08:00"
         assert payload["night_window"]["source"] == "manual"
+        assert payload["account_sharing"] == "balanced"
+        assert set(payload["providers"]) == {"workbuddy"}
         model = next(
             item for item in payload["models"] if item["model_id"] == "paid-model"
         )
@@ -229,6 +231,10 @@ def test_scheduling_policy_and_schedule_api(tmp_path, monkeypatch):
             "/api/policy", headers=csrf, json={"night_start": "25:99"}
         )
         assert bad_time.status_code == 400
+        bad_sharing = client.put(
+            "/api/policy", headers=csrf, json={"account_sharing": "random"}
+        )
+        assert bad_sharing.status_code == 400
 
         async def fake_login(realm: str) -> dict:
             return {

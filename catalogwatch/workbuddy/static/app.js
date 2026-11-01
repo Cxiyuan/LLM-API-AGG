@@ -780,6 +780,23 @@
     nightAuto.checked = policy.night_auto !== false;
     const nightStart = el("input", { type: "text", value: policy.night_start || "23:00" });
     const nightEnd = el("input", { type: "text", value: policy.night_end || "08:00" });
+    const sharing = el(
+      "select",
+      {},
+      el("option", { value: "balanced", text: "国内/国际账号均摊" }),
+      el("option", { value: "cost_first", text: "成本优先（国际账号仅兜底）" })
+    );
+    sharing.value = policy.account_sharing || "balanced";
+    const providerText = schedule && schedule.providers
+      ? Object.entries(schedule.providers)
+        .map(([provider, item]) =>
+          provider + "：账号 " + item.active_accounts
+          + "，已分配 " + item.requests
+          + "（每账号 " + item.requests_per_account + "，目标 "
+          + Math.round((item.target_share || 0) * 100) + "%）"
+        )
+        .join("；")
+      : "—";
     const period = schedule
       ? (schedule.period === "night" ? "夜间模式" : "白天模式")
       : "未知";
@@ -813,9 +830,11 @@
           text: "全局生效：所有 WorkBuddy 账号的自动选路都按这里的白天/夜间优先级执行。"
             + " 当前时段：" + period + "；夜间时段 " + windowText + "。",
         }),
+        el("p", { class: "muted", text: "账号均摊进度：" + providerText }),
         el(
           "div",
           { class: "form-grid" },
+          el("label", { class: "field" }, "账号均摊策略", sharing),
           el("label", { class: "field" }, "自动识别夜间时段", nightAuto),
           el("label", { class: "field" }, "夜间开始（HH:MM）", nightStart),
           el("label", { class: "field" }, "夜间结束（HH:MM）", nightEnd)
@@ -858,6 +877,7 @@
               night_auto: nightAuto.checked,
               night_start: nightStart.value.trim(),
               night_end: nightEnd.value.trim(),
+              account_sharing: sharing.value,
               day_priority: {},
               night_priority: {},
             };

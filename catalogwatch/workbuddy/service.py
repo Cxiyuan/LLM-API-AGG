@@ -95,10 +95,20 @@ class WorkBuddyService:
     CHECKIN_TZ = ZoneInfo("Asia/Shanghai")
 
     def checkin_global(self) -> dict:
+        hour = self.store.get_setting("auto_checkin_hour", 9)
+        minute = self.store.get_setting("auto_checkin_minute", 0)
+        try:
+            hour = int(hour)
+        except (TypeError, ValueError):
+            hour = 9
+        try:
+            minute = int(minute)
+        except (TypeError, ValueError):
+            minute = 0
         return {
             "enabled": bool(self.store.get_setting("auto_checkin_enabled", False)),
-            "hour": int(self.store.get_setting("auto_checkin_hour", 9) or 9),
-            "minute": int(self.store.get_setting("auto_checkin_minute", 0) or 0),
+            "hour": hour,
+            "minute": minute,
         }
 
     async def checkin_overview(self, *, force: bool = False) -> dict:

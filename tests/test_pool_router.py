@@ -273,3 +273,79 @@ def test_accounts_are_balanced_across_idle_pool_members(tmp_path):
     second_account = int(second[0].account["account_id"])
     assert second_account != first_account
     db.close()
+
+
+def _provider_account(store: WorkBuddyStore, account_id: int, provider: str, credits: float):
+    store.upsert_account(
+        {
+            "id": account_id,
+            "provider": provider,
+            "name": f"{provider}-{account_id}",
+            "status": "active",
+            "weight": 1,
+            "priority": 0,
+        }
+    )
+    store.record_credit_snapshot(
+        account_id,
+        {"ok": True, "available_total": credits, "total_dosage": credits},
+    )
+
+
+def _sharing_router(tmp_path):
+    from catalogwatch.workbuddy.router import DEFAULT_POLICY
+
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    _provider_account(store, 1, "workbuddy", 100)
+    _provider_account(store, 2, "workbuddy-i", 100)
+    store.upsert_models(
+        "workbuddy", [{"id": "cn-free", "credits": 0, "contextWindow": 100000}]
+    )
+    store.upsert_models(
+        "workbuddy-i", [{"id": "intl-free", "credits": 0, "contextWindow": 100000}]
+    )
+    router = PoolRouter(store, WorkBuddyCatalog(store, None))
+    key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
+    return db, store, router, key, DEFAULT_POLICY
+
+
+def test_balanced_sharing_alternates_providers(tmp_path):
+    db, store, router, key, _ = _sharing_router(tmp_path)
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    providers = [router.plan(intent, key)[0].provider for _ in range(4)]
+    assert providers == ["workbuddy", "workbuddy-i", "workbuddy", "workbuddy-i"]
+    snapshot = router.share_snapshot()["providers"]
+    assert snapshot["workbuddy"]["requests"] == 2
+    assert snapshot["workbuddy-i"]["requests"] == 2
+    db.close()
+
+
+def test_balanced_sharing_weights_by_active_account_count(tmp_path):
+    db, store, router, key, _ = _sharing_router(tmp_path)
+    _provider_account(store, 3, "workbuddy-i", 100)
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    providers = [router.plan(intent, key)[0].provider for _ in range(6)]
+    assert providers.count("workbuddy") == 2
+    assert providers.count("workbuddy-i") == 4
+    db.close()
+
+
+def test_cost_first_sharing_always_uses_the_cheapest_provider(tmp_path):
+    db, store, router, key, _ = _sharing_router(tmp_path)
+    store.set_setting("policy", {"account_sharing": "cost_first"})
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    assert [router.plan(intent, key)[0].provider for _ in range(3)] == [
+        "workbuddy",
+        "workbuddy",
+        "workbuddy",
+    ]
+    db.close()
+
+
+def test_balanced_ranking_keeps_candidates_from_each_provider(tmp_path):
+    db, store, router, key, policy = _sharing_router(tmp_path)
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    ranked = router._rank_models(intent, key, policy)
+    assert {item["provider"] for item in ranked} == {"workbuddy", "workbuddy-i"}
+    db.close()

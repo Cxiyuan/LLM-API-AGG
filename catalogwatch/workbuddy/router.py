@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,9 @@ DEFAULT_POLICY: dict[str, Any] = {
     "allow_over_max": False,
     "min_credit_reserve": 0,
     "account_strategy": "expiring_first",
+    # balanced: alternate auto tasks across active CN/INTL accounts by account
+    # count; cost_first: always use the cheapest provider/model.
+    "account_sharing": "balanced",
     # One extra attempt: provider catalogs can list entries the account cannot
     # serve; a bad pick should not sink the whole alias request.
     "max_attempts": 4,
@@ -169,6 +173,71 @@ class PoolRouter:
         self.load = load or LoadTracker()
         self._proven_at = 0.0
         self._proven: dict[tuple[str, str], int] = {}
+        self._share_lock = threading.Lock()
+        self._share_counts: dict[str, int] = {}
+
+    def _balanced_sharing(self, policy: dict, intent: PoolIntent) -> bool:
+        return (
+            str(policy.get("account_sharing") or "balanced") == "balanced"
+            and intent.model in {"auto", "free"}
+        )
+
+    def _active_provider_accounts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for account in self.store.list_accounts(present=True):
+            if str(account.get("status") or "active") != "active":
+                continue
+            provider = str(account.get("provider") or "")
+            if not provider:
+                continue
+            state = self.store.get_state(int(account["account_id"]))
+            if str(state.get("health") or "") == "error":
+                continue
+            counts[provider] = counts.get(provider, 0) + 1
+        return counts
+
+    def _preferred_provider(self, models: list[dict]) -> str | None:
+        active = self._active_provider_accounts()
+        providers = [
+            provider
+            for provider in active
+            if any(str(item.get("provider")) == provider for item in models)
+        ]
+        if len(providers) < 2:
+            return None
+        with self._share_lock:
+            return min(
+                providers,
+                key=lambda provider: (
+                    self._share_counts.get(provider, 0) / max(1, active[provider]),
+                    self._share_counts.get(provider, 0),
+                    provider,
+                ),
+            )
+
+    def _note_share(self, provider: str) -> None:
+        with self._share_lock:
+            self._share_counts[provider] = self._share_counts.get(provider, 0) + 1
+
+    def share_snapshot(self) -> dict:
+        """Current fairness counters and the per-account target share."""
+        active = self._active_provider_accounts()
+        total = sum(active.values())
+        with self._share_lock:
+            counts = dict(self._share_counts)
+        return {
+            "providers": {
+                provider: {
+                    "active_accounts": accounts,
+                    "requests": counts.get(provider, 0),
+                    "requests_per_account": round(
+                        counts.get(provider, 0) / max(1, accounts), 3
+                    ),
+                    "target_share": round(accounts / total, 3) if total else 0,
+                }
+                for provider, accounts in active.items()
+            }
+        }
 
     def _proven_models(self) -> dict[tuple[str, str], int]:
         """Recent success counts, cached briefly; the ledger survives restarts."""
@@ -494,6 +563,16 @@ class PoolRouter:
 
         filtered.sort(key=key_for)
         limit = max(1, min(10, int(policy.get("max_model_candidates") or 4)))
+        if self._balanced_sharing(policy, intent):
+            # Keep the best candidates from every provider so the provider
+            # fairness pass can choose either side without losing its models.
+            grouped: dict[str, list[dict]] = {}
+            for item in filtered:
+                grouped.setdefault(str(item.get("provider")), []).append(item)
+            result: list[dict] = []
+            for items in grouped.values():
+                result.extend(items[:limit])
+            return result
         return filtered[:limit]
 
     def _accounts_for(
@@ -656,9 +735,11 @@ class PoolRouter:
             intent, key, policy, session_id=session_id
         )
         preferred_account_id: int | None = None
+        binding_valid = False
         if binding:
             bound = self._bound_cost(binding, intent, key, policy)
             if bound is not None:
+                binding_valid = True
                 models = [
                     bound,
                     *[
@@ -680,6 +761,22 @@ class PoolRouter:
                     preferred_account_id = None
             else:
                 self.store.delete_session(session_id)
+
+        if not binding_valid and self._balanced_sharing(policy, intent):
+            preferred = self._preferred_provider(models)
+            if preferred:
+                models = [
+                    *[
+                        item
+                        for item in models
+                        if str(item.get("provider")) == preferred
+                    ],
+                    *[
+                        item
+                        for item in models
+                        if str(item.get("provider")) != preferred
+                    ],
+                ]
 
         max_attempts = max(1, min(5, int(policy.get("max_attempts") or 3)))
         used_pairs: set[tuple[int, str]] = set()
@@ -728,6 +825,9 @@ class PoolRouter:
                 " (login/credits/cooldown/caps are all unavailable)",
                 503,
             )
+
+        if self._balanced_sharing(policy, intent):
+            self._note_share(str(attempts[0].provider))
 
         if session_id and intent.model in ALIASES:
             first = attempts[0]

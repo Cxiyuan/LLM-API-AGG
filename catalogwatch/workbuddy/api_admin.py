@@ -650,6 +650,14 @@ async def update_policy(request: Request) -> dict:
             status_code=400,
             detail="routing_mode must be balanced, stable, or cost",
         )
+    if str(merged.get("account_sharing") or "balanced") not in {
+        "balanced",
+        "cost_first",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="account_sharing must be balanced or cost_first",
+        )
     merged = _merged_policy_for_update(merged)
     service.store.set_setting("policy", merged)
     _audit(service, actor, "policy.update", None, merged)
@@ -709,6 +717,8 @@ async def get_schedule(request: Request) -> dict:
         },
         "day_priority": policy.get("day_priority"),
         "night_priority": policy.get("night_priority"),
+        "account_sharing": policy.get("account_sharing", "balanced"),
+        "providers": service.router.share_snapshot().get("providers", {}),
         "models": models,
     }
 
