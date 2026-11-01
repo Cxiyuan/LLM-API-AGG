@@ -37,6 +37,16 @@ def error_body(code: str, message: str) -> dict:
     return {"error": {"message": message, "type": "pool_error", "code": code}}
 
 
+def _context_retry(intent: PoolIntent, status: int, detail: object) -> bool:
+    """Auto aliases may skip a model that returns a model-specific 400.
+
+    The bridge uses 400 for per-model failures such as "context exceeded" and
+    "model service info not found"; for auto/free/cheap these must fall through
+    to the next candidate instead of ending the request.
+    """
+    return intent.model in ALIASES and status == 400
+
+
 def _retryable(status: int) -> bool:
     # 0 = transport failure before an HTTP status reached us.
     # 404 = the catalog listed a model this account cannot serve; try another.
@@ -337,6 +347,29 @@ class PoolGateway:
             duration_ms=latency_ms,
             credits=None,
         )
+        if status_code == 400:
+            lowered = message.lower()
+            model_missing = any(
+                marker in lowered
+                for marker in (
+                    "service info not found",
+                    "model unavailable",
+                    "invalid model",
+                    "model not found",
+                )
+            )
+            context_bad = (
+                "上下文超过可用预算" in message
+                or "context_length_exceeded" in lowered
+                or "context length" in lowered
+            )
+            if model_missing or context_bad:
+                # Model-specific 400: avoid this model, but keep the account
+                # available for other models.
+                self.router.load.cooldown(
+                    attempt.provider, attempt.model_id, 1800 if model_missing else 300
+                )
+                return
         if code in {"stream_error", "stream_incomplete", "stream_timeout", "stream_transport"}:
             # A stream that already started cannot be retried inside this
             # request. Cool the model (not the account) so the next auto pick
@@ -480,7 +513,11 @@ class PoolGateway:
                     latency_ms=latency,
                     session_id=session_id,
                 )
-                retry = _retryable(exc.status_code) or _channel_rejected(str(exc))
+                retry = (
+                    _retryable(exc.status_code)
+                    or _channel_rejected(str(exc))
+                    or _context_retry(intent, exc.status_code, exc)
+                )
                 if retry and attempt_no < len(attempts):
                     continue
                 self.store.finish_request(
@@ -593,7 +630,11 @@ class PoolGateway:
                     latency_ms=latency,
                     session_id=session_id,
                 )
-                retry = _retryable(exc.status_code) or _channel_rejected(str(exc))
+                retry = (
+                    _retryable(exc.status_code)
+                    or _channel_rejected(str(exc))
+                    or _context_retry(intent, exc.status_code, exc)
+                )
                 if retry and attempt_no < len(attempts):
                     continue
                 self.store.finish_request(
@@ -620,7 +661,11 @@ class PoolGateway:
                     latency_ms=latency,
                     session_id=session_id,
                 )
-                retry = _retryable(response.status_code) or _channel_rejected(detail)
+                retry = (
+                    _retryable(response.status_code)
+                    or _channel_rejected(detail)
+                    or _context_retry(intent, response.status_code, detail)
+                )
                 if retry and attempt_no < len(attempts):
                     continue
                 self.store.finish_request(

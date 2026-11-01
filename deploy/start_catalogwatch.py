@@ -96,7 +96,7 @@ def ensure_gateway_key(
         "Authorization": f"Bearer {admin_token}",
         "Content-Type": "application/json",
     }
-    body = {"name": name, "default_channel": "workbuddy", "daily_limit": 0}
+    body = {"name": name, "default_channel": "*", "daily_limit": 0}
     try:
         with httpx.Client(timeout=10.0, trust_env=False, transport=transport) as client:
             response = client.post(
@@ -124,6 +124,48 @@ def ensure_gateway_key(
     return key
 
 
+def ensure_any_channel_key(
+    base_url: str,
+    admin_token: str,
+    key: str,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> None:
+    """Existing internal keys were created for the CN channel only; the pool
+    now serves both workbuddy and workbuddy-i, so the key must be any-channel."""
+    if not admin_token or not key:
+        return
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    with httpx.Client(timeout=10.0, trust_env=False, transport=transport) as client:
+        response = client.get(f"{base_url}/admin/api-keys", headers=headers)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"could not list gateway keys: HTTP {response.status_code}: {response.text[:200]}"
+            )
+        rows = response.json()
+        target = None
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            if row.get("key") == key or row.get("name") == "catalogwatch":
+                target = row
+                break
+        if target is None:
+            return
+        if str(target.get("default_channel") or "") == "*":
+            return
+        updated = client.put(
+            f"{base_url}/admin/api-keys/{target.get('id')}",
+            headers=headers,
+            json={"default_channel": "*"},
+        )
+        if updated.status_code >= 400:
+            raise RuntimeError(
+                f"could not switch the gateway key to any-channel: HTTP {updated.status_code}: {updated.text[:200]}"
+            )
+        log("switched the internal gateway key to any-channel")
+
+
 def main() -> None:
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
     base_url = os.environ.get("BUDDY2API_URL", "http://127.0.0.1:8787").rstrip("/")
@@ -135,6 +177,7 @@ def main() -> None:
 
     wait_for_health(base_url)
     key = ensure_gateway_key(base_url, admin_token, key_file)
+    ensure_any_channel_key(base_url, admin_token, key)
 
     env = os.environ.copy()
     env["WORKBUDDY_GATEWAY_KEY"] = key

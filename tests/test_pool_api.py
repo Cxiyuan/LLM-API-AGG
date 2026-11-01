@@ -250,3 +250,65 @@ def test_pool_rejects_direct_provider_models(tmp_path, monkeypatch):
         )
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "model_unavailable"
+
+
+def test_auto_retries_next_model_on_context_400(tmp_path, monkeypatch):
+    from catalogwatch.workbuddy.bridge import BridgeError
+
+    monkeypatch.setenv("CATALOGWATCH_POOL_SCHEDULER", "0")
+    monkeypatch.setenv("CATALOGWATCH_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("CATALOGWATCH_KEY_PEPPER", "test-pepper")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BUDDY2API_URL", "http://127.0.0.1:1")
+
+    app = create_app(_settings(tmp_path))
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/keys",
+            headers={"Authorization": "Bearer test-admin-token"},
+            json={"name": "smoke", "kind": "shared", "daily_request_limit": 0},
+        )
+        auth = {"Authorization": f"Bearer {created.json()['key']}"}
+        service = app.state.workbuddy
+        for account_id in (1, 2):
+            service.store.upsert_account(
+                {
+                    "id": account_id,
+                    "provider": "workbuddy",
+                    "name": f"acct-{account_id}",
+                    "status": "active",
+                }
+            )
+            service.store.record_credit_snapshot(
+                account_id, {"ok": True, "available_total": 100, "total_dosage": 100}
+            )
+        service.store.upsert_models(
+            "workbuddy",
+            [
+                {"id": "free-model", "credits": 0, "contextWindow": 100000},
+                {"id": "paid-model", "credits": 0.2, "contextWindow": 100000},
+            ],
+        )
+
+        class _Bridge:
+            def __init__(self):
+                self.models = []
+
+            async def post_chat_with_headers(self, payload, headers):
+                self.models.append(payload["model"])
+                if payload["model"] == "workbuddy/free-model":
+                    raise BridgeError(
+                        400,
+                        "workbuddy 上下文超过可用预算。没有更早的历史可以裁。请新开一段对话。",
+                    )
+                return _FakeResponse()
+
+        bridge = _Bridge()
+        service.gateway.bridge = bridge
+        response = client.post(
+            "/v1/chat/completions",
+            headers=auth,
+            json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code == 200, response.text
+        assert "workbuddy/paid-model" in bridge.models

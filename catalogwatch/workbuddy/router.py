@@ -657,7 +657,7 @@ class PoolRouter:
                 self.store.delete_session(session_id)
 
         max_attempts = max(1, min(5, int(policy.get("max_attempts") or 3)))
-        used_accounts: set[int] = set()
+        used_pairs: set[tuple[int, str]] = set()
         attempts: list[Attempt] = []
 
         for cost in models:
@@ -674,9 +674,10 @@ class PoolRouter:
                 continue
             for account, state, _cap in accounts:
                 account_id = int(account["account_id"])
-                if account_id in used_accounts:
+                pair = (account_id, model_id)
+                if pair in used_pairs:
                     continue
-                used_accounts.add(account_id)
+                used_pairs.add(pair)
                 attempts.append(
                     Attempt(
                         provider=provider,

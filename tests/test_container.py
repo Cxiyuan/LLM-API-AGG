@@ -34,7 +34,7 @@ def test_gateway_key_is_provisioned_and_reused(tmp_path):
             posts["count"] += 1
             assert request.headers.get("authorization") == "Bearer admin-token"
             body = json.loads(request.content)
-            assert body["default_channel"] == "workbuddy"
+            assert body["default_channel"] == "*"
             return httpx.Response(200, json={"id": 1, "key": "sk-cb-test"})
         return httpx.Response(404)
 
@@ -100,3 +100,35 @@ def test_vendored_bridge_is_pinned():
     assert (ROOT / "vendor" / "buddy2api" / "server.py").exists()
     assert (ROOT / "vendor" / "buddy2api" / "LICENSE").exists()
     assert (ROOT / "vendor" / "buddy2api" / "providers" / "workbuddy" / "oauth.py").exists()
+
+
+def test_existing_gateway_key_is_switched_to_any_channel(tmp_path):
+    module = _load_bootstrap()
+    updates = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/admin/api-keys" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 1,
+                        "name": "catalogwatch",
+                        "key": "sk-cb-test",
+                        "default_channel": "workbuddy",
+                    }
+                ],
+            )
+        if request.url.path == "/admin/api-keys/1" and request.method == "PUT":
+            body = json.loads(request.content)
+            updates.append(body)
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(404)
+
+    module.ensure_any_channel_key(
+        "http://bridge",
+        "admin-token",
+        "sk-cb-test",
+        transport=httpx.MockTransport(handler),
+    )
+    assert updates == [{"default_channel": "*"}]
