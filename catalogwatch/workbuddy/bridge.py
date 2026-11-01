@@ -143,7 +143,9 @@ class BuddyBridge:
 
     async def health(self) -> dict:
         try:
-            response = await self._client.get("/health")
+            # Health is a console/status probe; never let a stale keep-alive
+            # connection block the overview for the shared 300s stream timeout.
+            response = await self._client.get("/health", timeout=3.0)
         except httpx.HTTPError as exc:
             raise BridgeUnavailable(0, f"bridge health failed: {exc}") from exc
         self._raise(response)

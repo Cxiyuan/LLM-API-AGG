@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -104,7 +105,7 @@ async def overview(request: Request) -> dict:
     service, _actor = _admin(request)
     bridge: dict = {"ok": False}
     try:
-        bridge = await service.bridge.health()
+        bridge = await asyncio.wait_for(service.bridge.health(), timeout=4.0)
         # Buddy2api's /health reports {"status": "ok", ...}; normalize the flag
         # so clients that look for `ok` do not show a false "unreachable".
         if isinstance(bridge, dict):
