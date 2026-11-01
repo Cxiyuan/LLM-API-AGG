@@ -673,7 +673,7 @@ def upsert_login_account(parsed: dict) -> dict:
         db.update_account(existing["id"], patch)
         clear_session_dead(existing["id"])
         return {"id": existing["id"], "updated": True}
-    aid = db.add_account({**parsed, "provider": "workbuddy", "status": "active"})
+    aid = db.add_account({**parsed, "provider": channel, "status": "active"})
     return {"id": aid, "updated": False}
 
 

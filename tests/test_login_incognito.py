@@ -44,3 +44,36 @@ def test_global_login_requires_incognito_and_keeps_force_login():
 
     cn = asyncio.run(oauth.start_login("cn"))
     assert cn["requires_incognito"] is False
+
+
+def test_new_login_uses_the_provider_of_its_domain():
+    import importlib.util as importlib_util
+    import types
+
+    captured = {}
+    db_stub = types.ModuleType("database")
+    db_stub.list_accounts = lambda provider=None: []
+    db_stub.add_account = lambda data: captured.update(data) or 4
+    sys.modules["database"] = db_stub
+    fingerprint_stub = sys.modules.setdefault(
+        "fingerprint", types.ModuleType("fingerprint")
+    )
+    fingerprint_stub.user_agent = lambda: "test-agent"  # type: ignore[attr-defined]
+
+    path = ROOT / "vendor" / "buddy2api" / "auth_manager.py"
+    spec = importlib_util.spec_from_file_location("buddy2api_auth_test", path)
+    assert spec and spec.loader
+    module = importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    result = module.upsert_login_account(
+        {"uid": "intl-user", "nickname": "intl", "domain": "www.workbuddy.ai"}
+    )
+    assert result["id"] == 4
+    assert captured["provider"] == "workbuddy-i"
+
+    captured.clear()
+    module.upsert_login_account(
+        {"uid": "cn-user", "nickname": "cn", "domain": "www.codebuddy.cn"}
+    )
+    assert captured["provider"] == "workbuddy"
