@@ -78,11 +78,22 @@ def _error_status(error: object) -> int:
     """HTTP-like status carried by an in-stream error event, when present."""
     if not isinstance(error, dict):
         return 502
+    raw = error.get("code")
     try:
-        status = int(error.get("code"))  # type: ignore[arg-type]
+        status = int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return 502
-    return status if 400 <= status <= 599 else 502
+        status = 0
+    if 400 <= status <= 599:
+        return status
+    message = str(error.get("message") or "").lower()
+    code = str(raw or "").lower()
+    if "no available accounts" in message:
+        return 503
+    if "rate_limit" in code or "too many requests" in message or "429" in message:
+        return 429
+    if "context" in message or "上下文" in message:
+        return 400
+    return 502
 
 
 def _account_cooling(store: WorkBuddyStore, account_id: int) -> bool:
