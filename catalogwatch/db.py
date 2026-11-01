@@ -252,6 +252,27 @@ CREATE TABLE IF NOT EXISTS pool_settings (
     value_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Per-account check-in overrides. A row means "this account does not inherit
+-- the global rule"; enabled=0 is an explicit opt-out.
+CREATE TABLE IF NOT EXISTS wb_checkin_rules (
+    account_id INTEGER PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    hour INTEGER NOT NULL DEFAULT 9,
+    minute INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+-- Last auto/manual check-in attempt per account, used to run once per day and
+-- to show a status without hitting the bridge on every page render.
+CREATE TABLE IF NOT EXISTS wb_checkin_state (
+    account_id INTEGER PRIMARY KEY,
+    last_date TEXT,
+    last_status TEXT,
+    last_message TEXT,
+    last_attempt_at TEXT,
+    checked_at TEXT
+);
 """
 
 

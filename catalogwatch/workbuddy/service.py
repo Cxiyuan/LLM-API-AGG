@@ -6,6 +6,8 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from ..db import Database
 from ..util import utcnow_iso
@@ -50,6 +52,7 @@ class WorkBuddyService:
         self.gateway = PoolGateway(self.store, self.router, self.bridge)
         self.reconciler = Reconciler(self.store, self.bridge)
         self._locks: dict[str, asyncio.Lock] = {}
+        self._bridge_auto_checkin_off = False
 
     def _lock(self, key: str) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -87,6 +90,180 @@ class WorkBuddyService:
             catalog = [{"ok": False, "warning": str(exc)}]
         return {"accounts": len(accounts), "credits": credits, "catalog": catalog}
 
+    # --------------------------------------------------------------- check-in
+
+    CHECKIN_TZ = ZoneInfo("Asia/Shanghai")
+
+    def checkin_global(self) -> dict:
+        return {
+            "enabled": bool(self.store.get_setting("auto_checkin_enabled", False)),
+            "hour": int(self.store.get_setting("auto_checkin_hour", 9) or 9),
+            "minute": int(self.store.get_setting("auto_checkin_minute", 0) or 0),
+        }
+
+    async def checkin_overview(self, *, force: bool = False) -> dict:
+        today = datetime.now(self.CHECKIN_TZ).date().isoformat()
+        accounts = self.store.list_accounts(present=True)
+        try:
+            bridge = await self.accounts.checkin_status(force=force)
+        except Exception as exc:  # noqa: BLE001 - status is best effort
+            bridge = {"error": str(exc)[:300], "results": []}
+        status_by_id: dict[int, dict] = {}
+        if isinstance(bridge, dict):
+            for row in bridge.get("results") or []:
+                if isinstance(row, dict) and row.get("account_id") is not None:
+                    try:
+                        status_by_id[int(row["account_id"])] = row
+                    except (TypeError, ValueError):
+                        continue
+        rules = self.store.get_checkin_rules()
+        global_rule = self.checkin_global()
+        items = []
+        for account in accounts:
+            account_id = int(account["account_id"])
+            rule = rules.get(account_id)
+            effective = rule or global_rule
+            state = self.store.get_checkin_state(account_id) or {}
+            row_status = status_by_id.get(account_id) or {}
+            checked = bool(
+                row_status.get("today_checked_in")
+                or row_status.get("already_claimed")
+                or (state.get("last_date") == today and state.get("last_status") in {"claimed", "already", "checked"})
+            )
+            items.append(
+                {
+                    "account_id": account_id,
+                    "name": account.get("nickname") or account.get("name") or f"#{account_id}",
+                    "provider": account.get("provider") or "workbuddy",
+                    "online": bool(account.get("present", 1)),
+                    "status": account.get("status") or "active",
+                    "rule": {
+                        "source": "account" if rule else "global",
+                        "enabled": bool(effective.get("enabled")),
+                        "hour": int(effective.get("hour") or 0),
+                        "minute": int(effective.get("minute") or 0),
+                    },
+                    "checkin": {
+                        **row_status,
+                        "checked_today": checked,
+                        "state": state,
+                    },
+                }
+            )
+        return {"global": global_rule, "accounts": items, "summary": bridge}
+
+    async def run_checkin(self, account_id: int) -> dict:
+        result = await self.accounts.checkin_one(account_id)
+        today = datetime.now(self.CHECKIN_TZ).date().isoformat()
+        if result.get("claimed"):
+            status = "claimed"
+        elif result.get("today_checked_in") or result.get("already_claimed"):
+            status = "already"
+        elif result.get("ok"):
+            status = "checked"
+        else:
+            status = "failed"
+        self.store.set_checkin_state(
+            account_id,
+            date=today,
+            status=status,
+            message=str(result.get("message") or "")[:300],
+            attempted_at=utcnow_iso(),
+            checked_at=utcnow_iso() if status in {"claimed", "already", "checked"} else None,
+        )
+        self.store.audit(
+            "system",
+            "checkin.run",
+            str(account_id),
+            {"status": status, "message": str(result.get("message") or "")[:200]},
+        )
+        return result
+
+    async def run_all_checkins(self) -> dict:
+        results = []
+        for account in self.store.list_accounts(present=True):
+            account_id = int(account["account_id"])
+            try:
+                result = await self.run_checkin(account_id)
+            except Exception as exc:  # noqa: BLE001 - one failure must not stop the rest
+                result = {"ok": False, "account_id": account_id, "message": str(exc)[:300]}
+            results.append(result)
+        return {
+            "total": len(results),
+            "claimed": sum(1 for row in results if row.get("claimed")),
+            "results": results,
+        }
+
+    async def auto_checkin_tick(self) -> None:
+        now = datetime.now(self.CHECKIN_TZ)
+        today = now.date().isoformat()
+        global_rule = self.checkin_global()
+        rules = self.store.get_checkin_rules()
+        due: list[int] = []
+        for account in self.store.list_accounts(present=True):
+            if str(account.get("status") or "active") != "active":
+                continue
+            account_id = int(account["account_id"])
+            rule = rules.get(account_id)
+            effective = rule or global_rule
+            if not effective.get("enabled"):
+                continue
+            hour = int(effective.get("hour") or 0)
+            minute = int(effective.get("minute") or 0)
+            if (now.hour, now.minute) < (hour, minute):
+                continue
+            state = self.store.get_checkin_state(account_id) or {}
+            if state.get("last_date") == today:
+                if state.get("last_status") in {"claimed", "already", "checked"}:
+                    continue
+                attempted = state.get("last_attempt_at")
+                if attempted:
+                    try:
+                        moment = datetime.fromisoformat(attempted)
+                        if moment.tzinfo is None:
+                            moment = moment.replace(tzinfo=timezone.utc)
+                        if moment > datetime.now(timezone.utc) - timedelta(minutes=30):
+                            continue
+                    except ValueError:
+                        pass
+            due.append(account_id)
+        if not due:
+            return
+        try:
+            status = await self.accounts.checkin_status(force=False)
+        except Exception:  # noqa: BLE001 - claim still works without the pre-check
+            status = {}
+        status_by_id: dict[int, dict] = {}
+        for row in (status.get("results") if isinstance(status, dict) else None) or []:
+            if isinstance(row, dict) and row.get("account_id") is not None:
+                try:
+                    status_by_id[int(row["account_id"])] = row
+                except (TypeError, ValueError):
+                    continue
+        for account_id in due:
+            row_status = status_by_id.get(account_id) or {}
+            if row_status.get("today_checked_in") or row_status.get("already_claimed"):
+                self.store.set_checkin_state(
+                    account_id,
+                    date=today,
+                    status="already",
+                    message=str(row_status.get("message") or "今日已签到")[:300],
+                    attempted_at=utcnow_iso(),
+                    checked_at=utcnow_iso(),
+                )
+                continue
+            try:
+                await self.run_checkin(account_id)
+            except Exception as exc:  # noqa: BLE001 - keep the scheduler alive
+                log.warning("auto check-in failed for account %s: %s", account_id, exc)
+                self.store.set_checkin_state(
+                    account_id,
+                    date=today,
+                    status="failed",
+                    message=str(exc)[:300],
+                    attempted_at=utcnow_iso(),
+                )
+
     async def due_work(self) -> None:
         store = self.store
         now = time.monotonic()
@@ -101,6 +278,7 @@ class WorkBuddyService:
                 "catalog": 0.0,
                 "reconcile": 0.0,
                 "sessions": 0.0,
+                "checkin": 0.0,
             }
             self._last = last
 
@@ -133,6 +311,18 @@ class WorkBuddyService:
                 last["reconcile"] = now
         except Exception:  # noqa: BLE001
             log.exception("workbuddy ledger reconciliation failed")
+        try:
+            if has_accounts and now - last["checkin"] >= 60:
+                if not self._bridge_auto_checkin_off:
+                    try:
+                        await self.accounts.update_settings({"auto_checkin_enabled": False})
+                        self._bridge_auto_checkin_off = True
+                    except Exception:  # noqa: BLE001 - pool scheduler still works
+                        log.warning("could not disable the bridge auto check-in")
+                await self.auto_checkin_tick()
+                last["checkin"] = now
+        except Exception:  # noqa: BLE001
+            log.exception("workbuddy auto check-in tick failed")
         try:
             if now - last["sessions"] >= 3600:
                 store.cleanup_admin_sessions(utcnow_iso())

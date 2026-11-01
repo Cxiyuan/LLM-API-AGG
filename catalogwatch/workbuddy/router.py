@@ -526,10 +526,9 @@ class PoolRouter:
                 return 1
             return 0 if int(account["account_id"]) == int(preferred_account_id) else 1
 
-        def account_load(account: dict) -> int:
-            return self.load.account_inflight(
-                provider, model_id, int(account["account_id"])
-            )
+        def account_load(entry) -> int:
+            account = entry[0]
+            return self.load.account_load(provider, int(account["account_id"]))
 
         def free_key(entry):
             account, state, cap = entry
@@ -537,13 +536,15 @@ class PoolRouter:
                 int(account["account_id"]), model_id, day
             ).get("requests", 0)
             headroom = (cap - int(used)) if cap else 10**9
+            # Idle/least-used first: an agent task should spread across the
+            # account pool, not stay on whichever account answered last.
             return (
-                -int(headroom),
                 preferred_flag(account),
-                account_load(account),
+                account_load(entry),
+                int(state.get("daily_requests") or 0),
                 -int(account.get("priority") or 0),
                 -int(account.get("weight") or 1),
-                int(state.get("daily_requests") or 0),
+                -int(headroom),
                 int(account["account_id"]),
             )
 
@@ -560,23 +561,18 @@ class PoolRouter:
             except (TypeError, ValueError):
                 expiring = 0.0
             if strategy == "richest_first":
-                return (
-                    preferred_flag(account),
-                    -available,
-                    account_load(account),
-                    -int(account.get("priority") or 0),
-                    -int(account.get("weight") or 1),
-                    int(state.get("daily_requests") or 0),
-                    int(account["account_id"]),
-                )
+                credit_tiebreak = (-available, -expiring)
+            elif strategy == "expiring_first":
+                credit_tiebreak = (-expiring, -available)
+            else:
+                credit_tiebreak = (-available, -expiring)
             return (
                 preferred_flag(account),
-                -expiring,
-                -available,
-                account_load(account),
+                account_load(entry),
+                int(state.get("daily_requests") or 0),
+                *credit_tiebreak,
                 -int(account.get("priority") or 0),
                 -int(account.get("weight") or 1),
-                int(state.get("daily_requests") or 0),
                 int(account["account_id"]),
             )
 

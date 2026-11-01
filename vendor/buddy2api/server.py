@@ -847,10 +847,13 @@ async def admin_qclaw_login_complete(
 
 
 def _workbuddy_provider():
-    provider = providers.get_provider("workbuddy")
-    if provider is None:
-        raise HTTPException(status_code=400, detail="Channel 'workbuddy' is not enabled")
-    return provider
+    # The CN and INTL providers share the OAuth session store; whichever
+    # channel is enabled can poll a state created by the other realm.
+    for channel in ("workbuddy", "workbuddy-i"):
+        provider = providers.get_provider(channel)
+        if provider is not None:
+            return provider
+    raise HTTPException(status_code=400, detail="WorkBuddy channels are not enabled")
 
 
 @app.post("/admin/workbuddy/login/start")

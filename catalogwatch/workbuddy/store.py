@@ -716,6 +716,79 @@ class WorkBuddyStore:
                 (key, _json(value), utcnow_iso()),
             )
 
+    # --------------------------------------------------------------- check-in
+
+    def get_checkin_rules(self) -> dict[int, dict]:
+        rows = self.conn.execute("SELECT * FROM wb_checkin_rules").fetchall()
+        return {int(row["account_id"]): dict(row) for row in rows}
+
+    def get_checkin_rule(self, account_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM wb_checkin_rules WHERE account_id=?", (int(account_id),)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def set_checkin_rule(
+        self, account_id: int, *, enabled: bool, hour: int, minute: int
+    ) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO wb_checkin_rules (account_id, enabled, hour, minute, updated_at)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    enabled=excluded.enabled, hour=excluded.hour,
+                    minute=excluded.minute, updated_at=excluded.updated_at
+                """,
+                (int(account_id), 1 if enabled else 0, int(hour), int(minute), utcnow_iso()),
+            )
+
+    def delete_checkin_rule(self, account_id: int) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "DELETE FROM wb_checkin_rules WHERE account_id=?", (int(account_id),)
+            )
+
+    def get_checkin_state(self, account_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM wb_checkin_state WHERE account_id=?", (int(account_id),)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def set_checkin_state(
+        self,
+        account_id: int,
+        *,
+        date: str | None = None,
+        status: str | None = None,
+        message: str | None = None,
+        attempted_at: str | None = None,
+        checked_at: str | None = None,
+    ) -> None:
+        now = utcnow_iso()
+        with self.lock, self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO wb_checkin_state
+                    (account_id, last_date, last_status, last_message, last_attempt_at, checked_at)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    last_date=COALESCE(excluded.last_date, wb_checkin_state.last_date),
+                    last_status=COALESCE(excluded.last_status, wb_checkin_state.last_status),
+                    last_message=COALESCE(excluded.last_message, wb_checkin_state.last_message),
+                    last_attempt_at=COALESCE(excluded.last_attempt_at, wb_checkin_state.last_attempt_at),
+                    checked_at=COALESCE(excluded.checked_at, wb_checkin_state.checked_at)
+                """,
+                (
+                    int(account_id),
+                    date,
+                    status,
+                    message,
+                    attempted_at or now,
+                    checked_at,
+                ),
+            )
+
     def audit(self, actor: str, action: str, target: str | None = None, payload: Any = None) -> None:
         with self.lock, self.conn:
             self.conn.execute(

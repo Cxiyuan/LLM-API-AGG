@@ -182,8 +182,13 @@
   }
 
   async function loadAccounts() {
-    const data = await api("/api/workbuddy/accounts");
+    const [data, checkin] = await Promise.all([
+      api("/api/workbuddy/accounts"),
+      api("/api/workbuddy/checkin").catch(() => ({ accounts: [] })),
+    ]);
     const items = data.items || [];
+    const checkinById = {};
+    for (const item of checkin.accounts || []) checkinById[item.account_id] = item;
     const flow = el("div", { id: "login-flow" });
     const realm = el("select", {}, el("option", { value: "cn", text: "国内版" }), el("option", { value: "global", text: "国际版" }));
     const toolbar = el(
@@ -202,6 +207,14 @@
       const credit = account.latest_credit || {};
       const status = account.status || "unknown";
       const cooldown = stateData.cooldown_until || stateData.free_exhausted_until;
+      const ci = (checkinById[id] || {}).checkin || {};
+      const checked = Boolean(ci.checked_today);
+      const checkinCell = el(
+        "div",
+        {},
+        badge(checked ? "已签到" : (ci.ok === false ? "检查失败" : "未签到"), checked ? "free" : (ci.ok === false ? "bad" : "warn")),
+        checked ? null : el("button", { text: "签到", onclick: () => action(`/api/workbuddy/accounts/${id}/checkin`, { method: "POST" }, loadAccounts) })
+      );
       return [
         el("div", {}, el("strong", { text: account.nickname || account.name || ("#" + id) }), el("div", { class: "muted", text: "ID " + id + " · " + (account.provider || "") })),
         badge(status, status === "active" ? "free" : "bad"),
@@ -209,6 +222,7 @@
         num(credit.expiring_30d_total),
         el("div", { class: "muted", text: "free " + (stateData.free_requests_today || 0) + " / paid " + (stateData.paid_requests_today || 0) }),
         cooldown ? el("span", { class: "warn", text: cooldown }) : "—",
+        checkinCell,
         el(
           "div",
           { class: "row" },
@@ -241,7 +255,7 @@
       el(
         "div",
         {},
-        card("账号管理", toolbar, flow, items.length ? table(["账号", "状态", "可用积分", "30天到期", "今日用量", "冷却", "操作"], rows) : el("p", { class: "muted", text: "还没有账号。选择区域后点“添加账号”，在浏览器完成 WorkBuddy 授权。" })),
+        card("账号管理", toolbar, flow, items.length ? table(["账号", "状态", "可用积分", "30天到期", "今日用量", "冷却", "签到", "操作"], rows) : el("p", { class: "muted", text: "还没有账号。选择区域后点“添加账号”，在浏览器完成 WorkBuddy 授权。" })),
         card("说明", el("p", { class: "muted", text: "账号 token 只保存在 Buddy2api 的加密数据库里；本控制台只保存账号 ID、额度快照和用量。" }))
       )
     );
@@ -404,25 +418,28 @@
   // ------------------------------------------------------------------- checkin
 
   async function loadCheckin() {
-    const settings = await api("/api/workbuddy/checkin/settings");
-    let status = null;
-    try {
-      status = await api("/api/workbuddy/checkin");
-    } catch (error) {
-      status = { error: error.message };
-    }
-    const hour = el("input", { type: "number", min: "0", max: "23", value: String(settings.hour || 0) });
-    const enabled = el("input", { type: "checkbox" });
-    enabled.checked = Boolean(settings.enabled);
-    const risk = el("input", { type: "checkbox" });
-    const save = el("button", {
+    const data = await api("/api/workbuddy/checkin?force=0");
+    const global = data.global || { enabled: false, hour: 9, minute: 0 };
+    const accounts = data.accounts || [];
+
+    const genabled = el("input", { type: "checkbox" });
+    genabled.checked = Boolean(global.enabled);
+    const ghour = el("input", { type: "number", min: "0", max: "23", value: String(global.hour ?? 9) });
+    const gminute = el("input", { type: "number", min: "0", max: "59", value: String(global.minute ?? 0) });
+    const grisk = el("input", { type: "checkbox" });
+    const saveGlobal = el("button", {
       class: "primary",
-      text: "保存",
+      text: "保存全局规则",
       onclick: async () => {
         try {
           await api("/api/workbuddy/checkin/settings", {
             method: "PUT",
-            body: JSON.stringify({ enabled: enabled.checked, hour: Number(hour.value), confirm_risk: risk.checked }),
+            body: JSON.stringify({
+              enabled: genabled.checked,
+              hour: Number(ghour.value),
+              minute: Number(gminute.value),
+              confirm_risk: grisk.checked,
+            }),
           });
           await loadCheckin();
         } catch (error) {
@@ -430,17 +447,102 @@
         }
       },
     });
+
+    const rows = accounts.map((item) => {
+      const id = item.account_id;
+      const rule = item.rule || { source: "global", enabled: false, hour: 9, minute: 0 };
+      const isOverride = rule.source === "account";
+      const independent = el("input", { type: "checkbox" });
+      independent.checked = isOverride;
+      const enabled = el("input", { type: "checkbox" });
+      enabled.checked = Boolean(rule.enabled);
+      const hour = el("input", { type: "number", min: "0", max: "23", value: String(rule.hour ?? 9) });
+      const minute = el("input", { type: "number", min: "0", max: "59", value: String(rule.minute ?? 0) });
+      const syncDisabled = () => {
+        enabled.disabled = !independent.checked;
+        hour.disabled = !independent.checked;
+        minute.disabled = !independent.checked;
+      };
+      independent.addEventListener("change", () => {
+        syncDisabled();
+        if (saveRule) saveRule.textContent = independent.checked ? "保存单独规则" : "清除单独规则";
+      });
+      syncDisabled();
+
+      const saveRule = el("button", {
+        text: independent.checked ? "保存单独规则" : "清除单独规则",
+        onclick: async () => {
+          try {
+            if (independent.checked) {
+              await api(`/api/workbuddy/checkin/accounts/${id}`, {
+                method: "PUT",
+                body: JSON.stringify({
+                  enabled: enabled.checked,
+                  hour: Number(hour.value),
+                  minute: Number(minute.value),
+                }),
+              });
+            } else {
+              await api(`/api/workbuddy/checkin/accounts/${id}`, { method: "DELETE" });
+            }
+            await loadCheckin();
+          } catch (error) {
+            alert(error.message || String(error));
+          }
+        },
+      });
+
+      const ci = item.checkin || {};
+      const checked = Boolean(ci.checked_today);
+      const effective = (isOverride ? "单独" : "全局") + " " + String(rule.hour ?? 0).padStart(2, "0") + ":" + String(rule.minute ?? 0).padStart(2, "0");
+      const statusText = checked ? "已签到" : (ci.ok === false ? "检查失败" : "未签到");
+      const statusCls = checked ? "free" : (ci.ok === false ? "bad" : "warn");
+      const run = el("button", {
+        text: "立即签到",
+        disabled: checked,
+        onclick: () => action(`/api/workbuddy/accounts/${id}/checkin`, { method: "POST" }, loadCheckin),
+      });
+
+      return [
+        el("div", {}, el("strong", { text: item.name || "#" + id }), el("div", { class: "muted", text: "ID " + id + " · " + (item.provider || "") })),
+        el("div", {},
+          el("label", { class: "field" }, "单独规则 ", independent),
+          el("div", { class: "muted", text: effective + (isOverride ? "（优先于全局）" : "（继承）") })
+        ),
+        el("label", { class: "field" }, "启用 ", enabled),
+        hour,
+        minute,
+        saveRule,
+        el("div", {}, badge(statusText, statusCls), el("div", { class: "muted", text: ci.message || "" })),
+        run,
+      ];
+    });
+
     setView(
       el(
         "div",
         {},
         card(
-          "自动签到",
-          el("p", { class: "muted", text: "默认关闭。开启后由 Buddy2api 的调度器在每天指定小时领取积分；多账号自动签到可能违反 WorkBuddy 条款，存在限流/封号风险。" }),
-          el("div", { class: "form-grid" }, el("label", { class: "field" }, "启用", enabled), el("label", { class: "field" }, "执行小时（0-23）", hour), el("label", { class: "field" }, "我已知晓风险", risk)),
-          el("div", { class: "toolbar" }, save, el("button", { text: "立即签到", onclick: () => action("/api/workbuddy/checkin/run", { method: "POST" }, loadCheckin) }))
+          "全局自动签到",
+          el("p", { class: "muted", text: "默认关闭。开启后由 LLM-API-AGG 的调度器按账号规则执行；单独规则优先于全局规则。多账号自动签到可能违反 WorkBuddy 条款，存在限流/封号风险。" }),
+          el("div", { class: "form-grid" },
+            el("label", { class: "field" }, "启用", genabled),
+            el("label", { class: "field" }, "小时（0-23）", ghour),
+            el("label", { class: "field" }, "分钟（0-59）", gminute),
+            el("label", { class: "field" }, "我已知晓风险", grisk)
+          ),
+          el("div", { class: "toolbar" },
+            saveGlobal,
+            el("button", { text: "立即全部签到", onclick: () => action("/api/workbuddy/checkin/run", { method: "POST" }, loadCheckin) })
+          )
         ),
-        card("签到状态", el("pre", {}, JSON.stringify(status, null, 2)))
+        card(
+          "账号签到规则",
+          accounts.length
+            ? table(["账号", "规则来源", "单独启用", "小时", "分钟", "保存规则", "今日状态", "操作"], rows)
+            : el("p", { class: "muted", text: "还没有已登录账号。" }),
+          el("p", { class: "muted", text: "每个账号可单独设置启用/时间；清除单独规则后重新继承全局。已签到账号不会重复领取。" })
+        )
       )
     );
   }

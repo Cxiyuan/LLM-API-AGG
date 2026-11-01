@@ -205,3 +205,26 @@ def test_auto_prefers_free_then_current_discount(tmp_path):
     # free (0) -> discounted (0.2 * 0.5 = 0.1) -> plain (0.15)
     assert [item["model_id"] for item in ranked[:3]] == ["free-model", "discounted", "plain"]
     db.close()
+
+
+def test_accounts_are_balanced_across_idle_pool_members(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    _account(store, 1, 100)
+    _account(store, 2, 100)
+    store.upsert_models(
+        "workbuddy",
+        [{"id": "free-model", "credits": 0.0, "contextWindow": 100000}],
+    )
+    router = PoolRouter(store, WorkBuddyCatalog(store, None))
+    key = {"id": 1, "allowed_models": None, "max_attempts": 3, "daily_request_limit": 0}
+    intent = extract_intent({"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+
+    first = router.plan(intent, key, session_id="session-a")
+    first_account = int(first[0].account["account_id"])
+    # Mark the first account busy; a different session must go to the idle one.
+    router.load.enter("workbuddy", "free-model", first_account)
+    second = router.plan(intent, key, session_id="session-b")
+    second_account = int(second[0].account["account_id"])
+    assert second_account != first_account
+    db.close()

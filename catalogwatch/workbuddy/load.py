@@ -116,6 +116,19 @@ class LoadTracker:
                 )
             )
 
+    def account_load(self, provider: str, account_id: int | None) -> int:
+        """In-flight count across every model for one account."""
+        if account_id is None:
+            return 0
+        prefix = f"{provider}/"
+        suffix = f"/{int(account_id)}"
+        with self._lock:
+            return sum(
+                int(value)
+                for key, value in self._account_inflight.items()
+                if key.startswith(prefix) and key.endswith(suffix)
+            )
+
     def snapshot(self) -> dict:
         with self._lock:
             return {

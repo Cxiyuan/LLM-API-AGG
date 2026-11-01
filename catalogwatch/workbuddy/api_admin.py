@@ -330,27 +330,23 @@ async def _bridge_settings(service: WorkBuddyService) -> dict:
 
 
 @router.get("/workbuddy/checkin")
-async def checkin_status(request: Request) -> dict:
+async def checkin_status(request: Request, force: int = 0) -> dict:
     service, _actor = _admin(request)
-    return await service.accounts.checkin_status(force=False)
+    return await service.checkin_overview(force=bool(force))
 
 
 @router.post("/workbuddy/checkin/run")
 async def checkin_run(request: Request) -> dict:
     service, actor = _admin(request, mutation=True)
-    result = await service.accounts.checkin_all()
-    _audit(service, actor, "checkin.run", None, {"total": result.get("total"), "claimed": result.get("claimed")})
+    result = await service.run_all_checkins()
+    _audit(service, actor, "checkin.run_all", None, {"total": result.get("total"), "claimed": result.get("claimed")})
     return result
 
 
 @router.get("/workbuddy/checkin/settings")
 async def checkin_settings(request: Request) -> dict:
     service, _actor = _admin(request)
-    settings = await _bridge_settings(service)
-    return {
-        "enabled": bool(settings.get("auto_checkin_enabled", False)),
-        "hour": int(settings.get("auto_checkin_hour", 9) or 9),
-    }
+    return service.checkin_global()
 
 
 @router.put("/workbuddy/checkin/settings")
@@ -358,19 +354,87 @@ async def update_checkin_settings(request: Request) -> dict:
     service, actor = _admin(request, mutation=True)
     body = await _body(request)
     enabled = bool(body.get("enabled"))
-    hour = int(body.get("hour") or 9)
-    if not 0 <= hour <= 23:
-        raise HTTPException(status_code=400, detail="hour must be 0..23")
+    hour = int(body.get("hour") or 0)
+    minute = int(body.get("minute") or 0)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise HTTPException(status_code=400, detail="hour must be 0..23 and minute 0..59")
     if enabled and not body.get("confirm_risk"):
         raise HTTPException(
             status_code=400,
             detail="Enabling automatic check-in requires confirm_risk=true",
         )
-    result = await service.accounts.update_settings(
-        {"auto_checkin_enabled": enabled, "auto_checkin_hour": hour}
+    service.store.set_setting("auto_checkin_enabled", enabled)
+    service.store.set_setting("auto_checkin_hour", hour)
+    service.store.set_setting("auto_checkin_minute", minute)
+    try:
+        await service.accounts.update_settings({"auto_checkin_enabled": False})
+        service._bridge_auto_checkin_off = True
+    except Exception:  # noqa: BLE001 - pool scheduler remains authoritative
+        pass
+    _audit(service, actor, "checkin.settings", None, {"enabled": enabled, "hour": hour, "minute": minute})
+    return {"ok": True, "enabled": enabled, "hour": hour, "minute": minute}
+
+
+@router.put("/workbuddy/checkin/accounts/{account_id}")
+async def update_account_checkin(request: Request, account_id: int) -> dict:
+    service, actor = _admin(request, mutation=True)
+    if int(account_id) not in {
+        int(row["account_id"]) for row in service.store.list_accounts(present=True)
+    }:
+        raise HTTPException(status_code=404, detail="account not found")
+    body = await _body(request)
+    enabled = bool(body.get("enabled"))
+    hour = int(body.get("hour") or 0)
+    minute = int(body.get("minute") or 0)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise HTTPException(status_code=400, detail="hour must be 0..23 and minute 0..59")
+    service.store.set_checkin_rule(
+        int(account_id), enabled=enabled, hour=hour, minute=minute
     )
-    _audit(service, actor, "checkin.settings", None, {"enabled": enabled, "hour": hour})
-    return {"ok": True, "enabled": enabled, "hour": hour, "result": result}
+    _audit(
+        service,
+        actor,
+        "checkin.rule.set",
+        str(account_id),
+        {"enabled": enabled, "hour": hour, "minute": minute},
+    )
+    return {"ok": True, "account_id": int(account_id), "enabled": enabled, "hour": hour, "minute": minute}
+
+
+@router.delete("/workbuddy/checkin/accounts/{account_id}")
+async def clear_account_checkin(request: Request, account_id: int) -> dict:
+    service, actor = _admin(request, mutation=True)
+    service.store.delete_checkin_rule(int(account_id))
+    _audit(service, actor, "checkin.rule.clear", str(account_id))
+    return {"ok": True, "account_id": int(account_id)}
+
+
+@router.get("/workbuddy/accounts/{account_id}/checkin")
+async def account_checkin_status(request: Request, account_id: int, force: int = 1) -> dict:
+    service, _actor = _admin(request)
+    overview = await service.checkin_overview(force=bool(force))
+    for item in overview.get("accounts", []):
+        if int(item.get("account_id") or 0) == int(account_id):
+            return {"ok": True, "account_id": int(account_id), "item": item}
+    raise HTTPException(status_code=404, detail="account not found")
+
+
+@router.post("/workbuddy/accounts/{account_id}/checkin")
+async def account_checkin(request: Request, account_id: int) -> dict:
+    service, actor = _admin(request, mutation=True)
+    if int(account_id) not in {
+        int(row["account_id"]) for row in service.store.list_accounts(present=True)
+    }:
+        raise HTTPException(status_code=404, detail="account not found")
+    result = await service.run_checkin(int(account_id))
+    _audit(
+        service,
+        actor,
+        "checkin.run",
+        str(account_id),
+        {"ok": result.get("ok"), "claimed": result.get("claimed"), "message": result.get("message")},
+    )
+    return result
 
 
 @router.get("/workbuddy/keepalive/settings")
