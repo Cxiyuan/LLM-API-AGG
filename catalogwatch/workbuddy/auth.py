@@ -19,6 +19,30 @@ ADMIN_COOKIE = "cw_admin"
 CSRF_COOKIE = "cw_csrf"
 SESSION_HOURS = 12
 POOL_KEY_PREFIX = "sk-cw-"
+DEFAULT_ADMIN_USER = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin"
+
+
+def admin_username() -> str:
+    return os.environ.get("CATALOGWATCH_ADMIN_USER", "").strip() or DEFAULT_ADMIN_USER
+
+
+def admin_password() -> str:
+    return os.environ.get("CATALOGWATCH_ADMIN_PASSWORD", "") or DEFAULT_ADMIN_PASSWORD
+
+
+def credentials_match(username: str, password: str) -> bool:
+    """Constant-time check for the console account.
+
+    Both sides are encoded to UTF-8 because hmac.compare_digest rejects
+    non-ASCII str inputs; the console is a personal tool, so plain env values
+    are enough (no password hashing at rest).
+    """
+    expected_user = admin_username().encode("utf-8")
+    expected_password = admin_password().encode("utf-8")
+    return hmac.compare_digest(username.encode("utf-8"), expected_user) and hmac.compare_digest(
+        password.encode("utf-8"), expected_password
+    )
 
 
 def _data_dir() -> Path:
@@ -218,8 +242,3 @@ def note_login_failure(client: str) -> None:
 
 def clear_login_failures(client: str) -> None:
     _LOGIN_FAILURES.pop(client, None)
-
-
-def token_matches(token: str) -> bool:
-    expected = admin_token()
-    return bool(expected and token and secrets.compare_digest(token, expected))

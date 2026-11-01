@@ -693,7 +693,10 @@
       try {
         await api("/api/auth/login", {
           method: "POST",
-          body: JSON.stringify({ token: $("#login-token").value }),
+          body: JSON.stringify({
+            username: $("#login-username").value.trim(),
+            password: $("#login-password").value,
+          }),
         });
         showApp();
         state.view = "overview";

@@ -13,13 +13,13 @@ from .auth import (
     clear_login_failures,
     clear_session_cookies,
     create_admin_session,
+    credentials_match,
     hash_pool_key,
     login_allowed,
     new_pool_key,
     note_login_failure,
     require_admin,
     set_session_cookies,
-    token_matches,
 )
 from .router import DEFAULT_POLICY
 from .service import WorkBuddyService
@@ -63,17 +63,18 @@ async def login(request: Request) -> JSONResponse:
     if not login_allowed(client):
         raise HTTPException(status_code=429, detail="Too many login attempts")
     body = await _body(request)
-    token = str(body.get("token") or "")
-    if not token_matches(token):
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+    if not credentials_match(username, password):
         note_login_failure(client)
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
     clear_login_failures(client)
     session_id, csrf, expires = create_admin_session(
         service.store, user_agent=request.headers.get("user-agent")
     )
     response = JSONResponse({"ok": True, "expires_at": expires})
     set_session_cookies(response, session_id, csrf)
-    service.store.audit("session", "login", None, {"client": client})
+    service.store.audit(username or "session", "login", None, {"client": client})
     return response
 
 

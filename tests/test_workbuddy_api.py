@@ -25,10 +25,10 @@ def test_console_auth_and_empty_accounts(tmp_path, monkeypatch):
         unauthorized = client.get("/api/overview")
         assert unauthorized.status_code == 401
 
-        bad = client.post("/api/auth/login", json={"token": "wrong"})
+        bad = client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
         assert bad.status_code == 401
 
-        login = client.post("/api/auth/login", json={"token": "test-admin-token"})
+        login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
         assert login.status_code == 200
         assert client.cookies.get("cw_admin")
         assert client.cookies.get("cw_csrf")
@@ -65,3 +65,15 @@ def test_console_auth_and_empty_accounts(tmp_path, monkeypatch):
         )
         assert bearer.status_code == 200
         assert bearer.json()["actor"] == "bearer"
+
+        # The default admin/admin can be replaced from the environment.
+        monkeypatch.setenv("CATALOGWATCH_ADMIN_USER", "ops")
+        monkeypatch.setenv("CATALOGWATCH_ADMIN_PASSWORD", "s3cret")
+        old = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin"}
+        )
+        assert old.status_code == 401
+        new = client.post(
+            "/api/auth/login", json={"username": "ops", "password": "s3cret"}
+        )
+        assert new.status_code == 200

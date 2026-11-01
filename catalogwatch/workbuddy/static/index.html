@@ -27,9 +27,10 @@
   <main>
     <section id="login" class="card narrow">
       <h1>登录控制台</h1>
-      <p class="muted">使用容器生成的 <code>CATALOGWATCH_ADMIN_TOKEN</code>（/data/secrets/catalogwatch_admin_token）。</p>
+      <p class="muted">默认账号 <code>admin</code> / 密码 <code>admin</code>；可用环境变量 <code>CATALOGWATCH_ADMIN_USER</code> / <code>CATALOGWATCH_ADMIN_PASSWORD</code> 覆盖。</p>
       <form id="login-form">
-        <input id="login-token" type="password" autocomplete="current-password" placeholder="Admin token" required>
+        <input id="login-username" type="text" autocomplete="username" placeholder="账号" value="admin" required>
+        <input id="login-password" type="password" autocomplete="current-password" placeholder="密码" required>
         <button type="submit">登录</button>
       </form>
       <p id="login-error" class="error" hidden></p>
