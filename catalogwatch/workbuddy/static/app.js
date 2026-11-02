@@ -86,6 +86,41 @@
     return String(value);
   }
 
+  function bjTime(value, fallback = "—") {
+    if (value === null || value === undefined || value === "") return fallback;
+    let date;
+    if (typeof value === "number") {
+      date = new Date(value < 1e12 ? value * 1000 : value);
+    } else if (/^\d{4}-\d{2}-\d{2}T/.test(String(value))) {
+      date = new Date(String(value));
+    } else {
+      return String(value);
+    }
+    if (Number.isNaN(date.getTime())) return String(value);
+    const text = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(date);
+    return text.replace(/\//g, "-");
+  }
+
+  function bjDeep(value) {
+    if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+      return bjTime(value);
+    }
+    if (Array.isArray(value)) return value.map(bjDeep);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, bjDeep(item)]));
+    }
+    return value;
+  }
+
   function num(value) {
     if (value === null || value === undefined || value === "") return "—";
     const n = Number(value);
@@ -216,12 +251,12 @@
         ),
         card(
           "Buddy2api",
-          el("pre", {}, JSON.stringify(bridge, null, 2)),
+          el("pre", {}, JSON.stringify(bjDeep(bridge), null, 2)),
           el("p", { class: "muted", text: "内部调试地址：http://127.0.0.1:8787/（仅本机）" })
         ),
         card(
           "最近 WorkBuddy 目录快照",
-          el("pre", {}, JSON.stringify(snapshot || {}, null, 2))
+          el("pre", {}, JSON.stringify(bjDeep(snapshot || {}), null, 2))
         )
       )
     );
@@ -272,7 +307,7 @@
         num(account.available_credits),
         num(credit.expiring_30d_total),
         el("div", { class: "muted", text: "free " + (stateData.free_requests_today || 0) + " / paid " + (stateData.paid_requests_today || 0) }),
-        cooldown ? el("span", { class: "warn", text: cooldown }) : "—",
+        cooldown ? el("span", { class: "warn", text: bjTime(cooldown) }) : "—",
         checkinCell,
         el(
           "div",
@@ -309,7 +344,7 @@
         card("账号管理", toolbar, el("p", {
           class: "muted",
           text: "国际版添加账号时，如果浏览器已登录 workbuddy.ai，普通窗口会复用该会话；请点“添加账号”后复制授权链接到无痕/隐私窗口打开。",
-        }), flow, items.length ? table(["账号", "状态", "可用积分", "30天到期", "今日用量", "冷却", "签到", "操作"], rows) : el("p", { class: "muted", text: "还没有账号。选择区域后点“添加账号”，在浏览器完成 WorkBuddy 授权。" })),
+        }), flow, items.length ? table(["账号", "状态", "可用积分", "30天到期", "今日用量", "冷却（北京）", "签到", "操作"], rows) : el("p", { class: "muted", text: "还没有账号。选择区域后点“添加账号”，在浏览器完成 WorkBuddy 授权。" })),
         card("说明", el("p", { class: "muted", text: "账号 token 只保存在 Buddy2api 的加密数据库里；本控制台只保存账号 ID、额度快照和用量。" }))
       )
     );
@@ -431,7 +466,7 @@
       num(item.credits),
       item.free ? badge("免费", "free") : badge("计费", "paid"),
       item.promotion_active ? badge(fmt(item.badge, "促销") + " x" + num(item.promotion_factor), "free") : (item.badge ? badge(item.badge, "") : "—"),
-      fmt(item.promotion_until),
+      bjTime(item.promotion_until),
       fmt(item.context_length),
       item.cost_source || "unknown",
       el(
@@ -457,7 +492,7 @@
             ? el("p", { class: "warn", text: "目录警告：" + warningLabel(data.config_snapshot.warning) })
             : null,
           el("p", { class: "muted", text: "免费/低倍率按当前时间重算；夜间窗口使用促销自带的时区。已过滤 auto/default 等伪模型，以及视频、音频、图像生成等非文本模型。" }),
-          table(["模型", "基础倍率", "当前倍率", "状态", "促销", "截止", "上下文", "来源", "操作"], rows)
+          table(["模型", "基础倍率", "当前倍率", "状态", "促销", "截止（北京）", "上下文", "来源", "操作"], rows)
         )
       )
     );
@@ -716,7 +751,7 @@
     const rows = (data.items || []).map((item) => [
       el("code", { text: item.request_id }),
       fmt(item.session_id),
-      fmt(item.created_at),
+      bjTime(item.created_at),
       fmt(item.model_requested) + " → " + fmt(item.model_routed),
       fmt(item.bridge_account_id),
       badge(fmt(item.status_code), item.status_code >= 200 && item.status_code < 300 ? "free" : "bad"),
@@ -728,14 +763,14 @@
         onclick: async () => {
           try {
             const detail = await api("/api/requests/" + encodeURIComponent(item.request_id));
-            alert(JSON.stringify(detail, null, 2).slice(0, 4000));
+            alert(JSON.stringify(bjDeep(detail), null, 2).slice(0, 4000));
           } catch (error) {
             alert(error.message || String(error));
           }
         },
       }),
     ]);
-    setView(card("请求账本", table(["请求", "会话", "时间", "模型", "账号", "状态", "Tokens", "积分", "成本来源", "详情"], rows)));
+    setView(card("请求账本", table(["请求", "会话", "时间（北京）", "模型", "账号", "状态", "Tokens", "积分", "成本来源", "详情"], rows)));
   }
 
   // -------------------------------------------------------------------- policy
@@ -958,13 +993,13 @@
   async function loadAudit() {
     const data = await api("/api/audit?limit=200");
     const rows = (data.items || []).map((item) => [
-      fmt(item.ts),
+      bjTime(item.ts),
       fmt(item.actor),
       fmt(item.action),
       fmt(item.target),
-      el("code", { text: JSON.stringify(item.payload || {}, null, 0).slice(0, 300) }),
+      el("code", { text: JSON.stringify(bjDeep(item.payload || {}), null, 0).slice(0, 300) }),
     ]);
-    setView(card("审计日志", table(["时间", "角色", "动作", "目标", "详情"], rows)));
+    setView(card("审计日志", table(["时间（北京）", "角色", "动作", "目标", "详情"], rows)));
   }
 
   // ---------------------------------------------------------------- navigation
