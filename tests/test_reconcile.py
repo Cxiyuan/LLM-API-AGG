@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from catalogwatch.db import Database
-from catalogwatch.util import utcnow_iso
+from catalogwatch.util import local_day, utcnow_iso
 from catalogwatch.workbuddy.reconcile import Reconciler
 from catalogwatch.workbuddy.store import WorkBuddyStore
 
@@ -37,7 +37,7 @@ async def test_pending_request_is_reconciled_from_bridge_log(tmp_path):
         daily_credit_limit=0,
         max_attempts=3,
     )
-    day = utcnow_iso()[:10]
+    day = local_day()
     assert store.reserve_key_request(key_id, day, 0)
     store.start_request(
         request_id="req-1",

@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from ..util import utcnow_iso
+from ..util import local_day, utcnow_iso
 from .bridge import BridgeError, BuddyBridge
 from .router import ALIASES, Attempt, PoolError, PoolIntent, PoolRouter, extract_intent
 from .store import WorkBuddyStore
@@ -229,7 +229,7 @@ class PoolGateway:
         key_id = key.get("id")
         if not key_id:
             return
-        day = utcnow_iso()[:10]
+        day = local_day()
         usage = self.store.key_usage_today(int(key_id), day)
         credit_limit = float(key.get("daily_credit_limit") or 0)
         if credit_limit > 0 and float(usage.get("credits") or 0) >= credit_limit:
@@ -370,7 +370,7 @@ class PoolGateway:
         )
         if key.get("id"):
             self.store.add_key_usage(
-                int(key["id"]), utcnow_iso()[:10], tokens=total, credits=credit_value
+                int(key["id"]), local_day(), tokens=total, credits=credit_value
             )
         if account_id is not None:
             self.store.increment_daily(

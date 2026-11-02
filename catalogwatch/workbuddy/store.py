@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from ..db import Database
-from ..util import utcnow_iso
+from ..util import local_day, utcnow_iso
 from .promotions import parse_credits
 
 _COST_CAPABILITY_KEYS = (
@@ -274,7 +274,7 @@ class WorkBuddyStore:
         self.update_state(account_id, free_exhausted_until=until, last_429_at=utcnow_iso())
 
     def increment_daily(self, account_id: int, *, free: bool, tokens: int, credits: float) -> None:
-        day = utcnow_iso()[:10]
+        day = local_day()
         self.reset_daily_if_needed(account_id, day)
         column = "free_requests_today" if free else "paid_requests_today"
         with self.lock, self.conn:
@@ -1358,7 +1358,7 @@ class WorkBuddyStore:
             )
             key_id = row["pool_key_id"]
             if key_id:
-                day = str(row["created_at"] or now)[:10]
+                day = local_day(str(row["created_at"] or now))
                 self.conn.execute(
                     """
                     UPDATE pool_key_daily_usage SET

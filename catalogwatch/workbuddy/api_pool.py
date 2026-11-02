@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from ..util import utcnow_iso
+from ..util import local_day, utcnow_iso
 from .auth import require_pool_key
 from .gateway import PoolHTTPError, error_body
 from .messages import anthropic_error, to_anthropic_response, to_openai_request, translate_stream
@@ -329,7 +329,7 @@ async def messages(request: Request):
 async def usage(request: Request) -> dict:
     service = _service(request)
     key = require_pool_key(request, service.store)
-    day = utcnow_iso()[:10]
+    day = local_day()
     return {
         "key": {
             "id": key.get("id"),

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..util import utcnow_iso
+from ..util import local_day, utcnow_iso
 from .catalog import WorkBuddyCatalog
 from .load import LoadTracker
 from .model_filter import is_text_chat_model, is_tool_capable_model
@@ -601,7 +601,7 @@ class PoolRouter:
         *,
         preferred_account_id: int | None = None,
     ) -> list[tuple[dict, dict, int | None]]:
-        day = utcnow_iso()[:10]
+        day = local_day()
         model_id = str(cost["model_id"])
         free = bool(cost.get("free"))
         min_reserve = float(policy.get("min_credit_reserve") or 0)

@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from catalogwatch.api import create_app
 from catalogwatch.config import load_settings
-from catalogwatch.util import utcnow_iso
+from catalogwatch.util import local_day, utcnow_iso
 
 
 def _settings(tmp_path):
@@ -135,7 +135,7 @@ def test_pool_key_and_chat_ledger(tmp_path, monkeypatch):
         assert requests[0]["status_code"] == 200
         assert requests[0]["total_tokens"] == 3
 
-        usage = service.store.key_usage_today(key_id, utcnow_iso()[:10])
+        usage = service.store.key_usage_today(key_id, local_day())
         # A request rejected before dispatch (no account/model) does not reserve
         # the key quota; only the dispatched request counts.
         assert usage["requests"] == 1
