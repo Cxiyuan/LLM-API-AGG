@@ -194,7 +194,11 @@ class PoolRouter:
             if not provider:
                 continue
             state = self.store.get_state(int(account["account_id"]))
-            if str(state.get("health") or "") == "error":
+            # Health errors from a previous outage clear only after a
+            # successful request; keep those accounts in the share target so
+            # they get traffic and can recover. A live cooldown still means
+            # the account cannot serve right now.
+            if _future(state.get("cooldown_until")):
                 continue
             counts[provider] = counts.get(provider, 0) + 1
         return counts
