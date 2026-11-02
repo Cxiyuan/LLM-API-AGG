@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from ..util import utcnow_iso
 from .auth import require_pool_key
@@ -163,6 +164,10 @@ async def chat_completions(request: Request):
             ),
             media_type="text/event-stream",
             headers=headers,
+            # Even if the client disconnects before Starlette starts iterating
+            # the body, this releases the upstream connection. Without it a
+            # leaked response holds an httpx pool slot forever.
+            background=BackgroundTask(response.aclose),
         )
 
     try:
@@ -212,6 +217,10 @@ async def responses(request: Request):
             ),
             media_type="text/event-stream",
             headers=headers,
+            # Even if the client disconnects before Starlette starts iterating
+            # the body, this releases the upstream connection. Without it a
+            # leaked response holds an httpx pool slot forever.
+            background=BackgroundTask(response.aclose),
         )
 
     try:
@@ -283,6 +292,10 @@ async def messages(request: Request):
             translate_stream(raw_stream, request_model),
             media_type="text/event-stream",
             headers=headers,
+            # Even if the client disconnects before Starlette starts iterating
+            # the body, this releases the upstream connection. Without it a
+            # leaked response holds an httpx pool slot forever.
+            background=BackgroundTask(response.aclose),
         )
 
     try:

@@ -53,6 +53,7 @@ class WorkBuddyService:
         self.reconciler = Reconciler(self.store, self.bridge)
         self._locks: dict[str, asyncio.Lock] = {}
         self._bridge_auto_checkin_off = False
+        self._bridge_failures = 0
 
     def _lock(self, key: str) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -293,8 +294,30 @@ class WorkBuddyService:
                 "reconcile": 0.0,
                 "sessions": 0.0,
                 "checkin": 0.0,
+                "bridge": 0.0,
             }
             self._last = last
+
+        try:
+            if now - last["bridge"] >= 30:
+                last["bridge"] = now
+                try:
+                    await asyncio.wait_for(self.bridge.health(), timeout=5.0)
+                    self._bridge_failures = 0
+                except Exception:  # noqa: BLE001 - watchdog must never stop the scheduler
+                    self._bridge_failures += 1
+                    if self._bridge_failures >= 6:
+                        log.error(
+                            "Buddy2api health failed %s consecutive probes; resetting the HTTP client",
+                            self._bridge_failures,
+                        )
+                        try:
+                            await self.bridge.reset_client()
+                        except Exception:  # noqa: BLE001
+                            log.exception("could not reset the Buddy2api HTTP client")
+                        self._bridge_failures = 0
+        except Exception:  # noqa: BLE001
+            log.exception("workbuddy bridge watchdog failed")
 
         try:
             if now - last["accounts"] >= account_interval:

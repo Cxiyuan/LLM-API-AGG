@@ -506,3 +506,15 @@ def test_in_stream_quota_error_keeps_its_real_status(tmp_path, monkeypatch):
     finally:
         client.__exit__(None, None, None)
 
+
+
+def test_streaming_endpoints_release_the_upstream_response():
+    source = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "catalogwatch"
+        / "workbuddy"
+        / "api_pool.py"
+    ).read_text(encoding="utf-8")
+    # A client can disconnect before Starlette starts iterating the body; the
+    # background close is what prevents a leaked httpx pool slot.
+    assert source.count("background=BackgroundTask(response.aclose)") == 3

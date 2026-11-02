@@ -42,13 +42,39 @@ class BuddyBridge:
         self.base_url = base_url.rstrip("/")
         self.admin_token = admin_token.strip()
         self.gateway_key = gateway_key.strip()
-        self._client = httpx.AsyncClient(
+        self._transport = transport
+        self._timeout = httpx.Timeout(timeout, connect=10.0, pool=30.0)
+        self._limits = httpx.Limits(
+            max_connections=300, max_keepalive_connections=50
+        )
+        self._client = self._new_client()
+
+    def _new_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=httpx.Timeout(timeout, connect=10.0),
+            # Pool waits are bounded: a saturated client should fail an attempt
+            # quickly instead of parking requests for the full stream timeout.
+            timeout=self._timeout,
+            limits=self._limits,
             follow_redirects=False,
             trust_env=False,
-            transport=transport,
+            transport=self._transport,
         )
+
+    async def reset_client(self) -> None:
+        """Discard the HTTP pool after a sustained outage.
+
+        Leaked streaming responses (for example a client that disappears
+        before Starlette starts iterating the body) can leave sockets in
+        CLOSE_WAIT until the pool is exhausted. Replacing the client releases
+        them; in-flight requests fail and retry against the fresh pool.
+        """
+        old = self._client
+        self._client = self._new_client()
+        try:
+            await old.aclose()
+        except Exception:  # noqa: BLE001 - best effort during recovery
+            pass
 
     async def aclose(self) -> None:
         await self._client.aclose()
