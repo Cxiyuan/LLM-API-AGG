@@ -773,8 +773,17 @@ class PoolGateway:
                     return
                 yield chunk
         finally:
-            if pending is not None and not pending.done():
-                pending.cancel()
+            if pending is not None:
+                if not pending.done():
+                    pending.cancel()
+                else:
+                    # The consumer may close the stream between the wait()
+                    # and result(); retrieve the completed future so asyncio
+                    # does not log "Task exception was never retrieved".
+                    try:
+                        pending.exception()
+                    except (asyncio.CancelledError, StopAsyncIteration):
+                        pass
 
     async def stream_body(
         self,
