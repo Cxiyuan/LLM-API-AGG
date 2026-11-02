@@ -1261,6 +1261,45 @@ class WorkBuddyStore:
                 (credits, request_id, int(attempt_no)),
             )
 
+    def reconcile_attempt(
+        self,
+        request_id: str,
+        attempt_no: int,
+        *,
+        credits: float | None = None,
+        status_code: int | None = None,
+        model_id: str | None = None,
+        provider: str | None = None,
+        account_id: int | None = None,
+    ) -> None:
+        """Fill an attempt from the bridge log, including its final status.
+
+        A client can close a stream after receiving its tool call; the pool
+        records that attempt as 499, while the bridge log still shows the
+        completed request. Reconcile the attempt with the bridge's view.
+        """
+        fields: dict[str, Any] = {}
+        if credits is not None:
+            fields["credits"] = credits
+        if status_code is not None:
+            fields["status_code"] = int(status_code)
+            if int(status_code) == 200:
+                fields["error_code"] = None
+        if model_id:
+            fields["model_id"] = model_id
+        if provider:
+            fields["provider"] = provider
+        if account_id is not None:
+            fields["account_id"] = int(account_id)
+        if not fields:
+            return
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        with self.lock, self.conn:
+            self.conn.execute(
+                f"UPDATE pool_request_attempts SET {assignments} WHERE request_id=? AND attempt_no=?",
+                [*fields.values(), request_id, int(attempt_no)],
+            )
+
     def reconcile_request(
         self,
         request_id: str,
@@ -1271,6 +1310,10 @@ class WorkBuddyStore:
         credits: float,
         status_code: int,
         finish_reason: str | None,
+        error_code: str | None = None,
+        model_routed: str | None = None,
+        provider: str | None = None,
+        bridge_account_id: int | None = None,
     ) -> bool:
         """Fill exact usage from the bridge log and adjust dependent counters."""
         now = utcnow_iso()
@@ -1291,7 +1334,11 @@ class WorkBuddyStore:
                 UPDATE pool_requests SET
                     prompt_tokens=?, completion_tokens=?, total_tokens=?,
                     credits=?, credits_estimated=0, cost_source='reconciled',
-                    status_code=?, finish_reason=?, reconciled_at=?
+                    status_code=?, finish_reason=?, error_code=?,
+                    model_routed=COALESCE(?, model_routed),
+                    provider=COALESCE(?, provider),
+                    bridge_account_id=COALESCE(?, bridge_account_id),
+                    reconciled_at=?
                 WHERE request_id=?
                 """,
                 (
@@ -1301,6 +1348,10 @@ class WorkBuddyStore:
                     new_credits,
                     int(status_code),
                     finish_reason,
+                    error_code,
+                    model_routed,
+                    provider,
+                    bridge_account_id,
                     now,
                     request_id,
                 ),
@@ -1326,8 +1377,27 @@ class WorkBuddyStore:
                     """,
                     (delta_tokens, delta_credits, int(key_id)),
                 )
-            account_id = row["bridge_account_id"]
-            if account_id:
+            old_account = row["bridge_account_id"]
+            new_account = (
+                bridge_account_id
+                if bridge_account_id is not None
+                else old_account
+            )
+            if old_account and new_account != old_account:
+                # The bridge log now attributes this request to a different
+                # account (a canceled request can lack the pool's account id).
+                # Move the usage delta instead of double counting it.
+                self.conn.execute(
+                    """
+                    UPDATE wb_account_state SET
+                        daily_tokens=MAX(0, daily_tokens - ?),
+                        daily_credits=MAX(0, daily_credits - ?),
+                        updated_at=?
+                    WHERE account_id=?
+                    """,
+                    (delta_tokens, delta_credits, now, int(old_account)),
+                )
+            if new_account:
                 self.conn.execute(
                     """
                     UPDATE wb_account_state SET
@@ -1336,7 +1406,7 @@ class WorkBuddyStore:
                         updated_at=?
                     WHERE account_id=?
                     """,
-                    (delta_tokens, delta_credits, now, int(account_id)),
+                    (delta_tokens, delta_credits, now, int(new_account)),
                 )
         return True
 

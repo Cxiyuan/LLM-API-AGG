@@ -209,3 +209,73 @@ async def test_reconcile_sums_every_attempt_including_canceled_output(tmp_path):
     assert [item["credits"] for item in attempts] == [1.25, 2.5]
     assert bridge.calls == ["req-multi:1", "req-multi:2"]
     db.close()
+
+
+async def test_client_canceled_row_is_reconciled_from_the_bridge_log(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    store.upsert_account(
+        {"id": 2, "provider": "workbuddy-i", "name": "intl", "status": "active"}
+    )
+    store.start_request(
+        request_id="req-close",
+        pool_key_id=None,
+        endpoint="chat",
+        model_requested="auto",
+        stream=True,
+        intent={},
+        routing=[],
+    )
+    store.record_attempt(
+        request_id="req-close",
+        attempt_no=1,
+        account_id=None,
+        model_id=None,
+        provider=None,
+        status_code=499,
+        error_code="client_canceled",
+        started_at=utcnow_iso(),
+        duration_ms=10,
+        credits=None,
+    )
+    store.finish_request(
+        "req-close",
+        status_code=499,
+        error_code="client_canceled",
+        attempts=1,
+    )
+    bridge = _MappedBridge(
+        {
+            "req-close:1": [
+                {
+                    "model": "workbuddy-i/hy3",
+                    "account_id": 2,
+                    "status_code": 200,
+                    "prompt_tokens": 1200,
+                    "completion_tokens": 80,
+                    "total_tokens": 1280,
+                    "credit": 0.0,
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    )
+    result = await Reconciler(store, bridge).reconcile(older_than_seconds=0)
+    assert result["reconciled"] == 1
+    request = store.get_request("req-close")
+    # The client closed after its tool call; the upstream request completed.
+    assert request["status_code"] == 200
+    assert request["error_code"] is None
+    assert request["model_routed"] == "hy3"
+    assert request["provider"] == "workbuddy-i"
+    assert request["bridge_account_id"] == 2
+    assert request["total_tokens"] == 1280
+    assert request["finish_reason"] == "tool_calls"
+    attempt = store.list_attempts("req-close")[0]
+    assert attempt["status_code"] == 200
+    assert attempt["error_code"] is None
+    assert attempt["model_id"] == "hy3"
+    assert attempt["account_id"] == 2
+    state = store.get_state(2)
+    assert state["daily_tokens"] == 1280
+    db.close()

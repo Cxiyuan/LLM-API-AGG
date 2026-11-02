@@ -757,26 +757,37 @@ class PoolRouter:
         if binding:
             bound = self._bound_cost(binding, intent, key, policy)
             if bound is not None:
-                binding_valid = True
-                models = [
-                    bound,
-                    *[
-                        item
-                        for item in models
-                        if not (
-                            item.get("provider") == bound.get("provider")
-                            and item.get("model_id") == bound.get("model_id")
+                # A session that once fell back to a paid model must not stay
+                # pinned there after a free model becomes usable again. The
+                # user's policy is free-first: the cheap affinity is worth
+                # breaking, while a free binding keeps session cache affinity.
+                keep_binding = not (
+                    intent.model in ALIASES
+                    and not bound.get("free")
+                    and bool(policy.get("prefer_free", True))
+                    and any(item.get("free") for item in models)
+                )
+                if keep_binding:
+                    binding_valid = True
+                    models = [
+                        bound,
+                        *[
+                            item
+                            for item in models
+                            if not (
+                                item.get("provider") == bound.get("provider")
+                                and item.get("model_id") == bound.get("model_id")
+                            )
+                        ],
+                    ]
+                    try:
+                        preferred_account_id = (
+                            int(binding.get("account_id"))
+                            if binding.get("account_id") is not None
+                            else None
                         )
-                    ],
-                ]
-                try:
-                    preferred_account_id = (
-                        int(binding.get("account_id"))
-                        if binding.get("account_id") is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    preferred_account_id = None
+                    except (TypeError, ValueError):
+                        preferred_account_id = None
             else:
                 self.store.delete_session(session_id)
 

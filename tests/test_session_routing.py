@@ -83,3 +83,82 @@ def test_inflight_load_steers_new_sessions_away(tmp_path):
     attempts = router.plan(intent, key, session_id="load-aware")
     assert attempts[0].model_id == "m1"
     db.close()
+
+
+def test_paid_session_binding_yields_to_a_newly_available_free_model(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    store.upsert_account(
+        {"id": 1, "provider": "workbuddy", "name": "main", "status": "active"}
+    )
+    store.record_credit_snapshot(
+        1, {"ok": True, "available_total": 100, "total_dosage": 100}
+    )
+    store.upsert_models(
+        "workbuddy",
+        [
+            {
+                "id": "free-model",
+                "credits": 0,
+                "contextWindow": 100000,
+                "supportsToolCall": True,
+            },
+            {
+                "id": "paid-model",
+                "credits": 0.2,
+                "contextWindow": 100000,
+                "supportsToolCall": True,
+            },
+        ],
+    )
+    store.replace_promotions(
+        "workbuddy",
+        {
+            "paid-model": [
+                {
+                    "label": "限时折扣",
+                    "color": None,
+                    "factor": 0.5,
+                    "priority": 0,
+                    "active_only": False,
+                    "schedule": None,
+                    "text_zh": "",
+                    "text_en": "",
+                }
+            ]
+        },
+    )
+    store.upsert_session(
+        "paid-session",
+        provider="workbuddy",
+        model_id="paid-model",
+        account_id=1,
+        ttl_seconds=1800,
+    )
+    router = PoolRouter(store, WorkBuddyCatalog(store, None), LoadTracker())
+    key = {"id": 1, "allowed_models": None, "max_attempts": 3}
+    intent = extract_intent(
+        {"model": "auto", "messages": [{"role": "user", "content": "hi"}]}
+    )
+
+    # The session fell back to a paid model earlier. Once a free model is
+    # usable again, free-first must win over paid-model affinity.
+    first = router.plan(intent, key, session_id="paid-session")
+    assert first[0].model_id == "free-model"
+    assert store.get_session("paid-session")["model_id"] == "free-model"
+
+    # With no free model present, the paid binding is still the best choice.
+    with store.lock, store.conn:
+        store.conn.execute(
+            "UPDATE wb_models SET present=0 WHERE provider='workbuddy' AND model_id='free-model'"
+        )
+    store.upsert_session(
+        "paid-session-2",
+        provider="workbuddy",
+        model_id="paid-model",
+        account_id=1,
+        ttl_seconds=1800,
+    )
+    second = router.plan(intent, key, session_id="paid-session-2")
+    assert second[0].model_id == "paid-model"
+    db.close()
