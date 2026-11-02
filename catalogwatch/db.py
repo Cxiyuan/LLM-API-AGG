@@ -195,6 +195,8 @@ CREATE TABLE IF NOT EXISTS pool_requests (
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
     credits REAL,
     credits_estimated INTEGER NOT NULL DEFAULT 0,
     effective_credits REAL,
@@ -297,6 +299,14 @@ class Database:
         }
         if columns and "session_id" not in columns:
             self.conn.execute("ALTER TABLE pool_requests ADD COLUMN session_id TEXT")
+        if columns and "cache_hit_tokens" not in columns:
+            self.conn.execute(
+                "ALTER TABLE pool_requests ADD COLUMN cache_hit_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+        if columns and "cache_miss_tokens" not in columns:
+            self.conn.execute(
+                "ALTER TABLE pool_requests ADD COLUMN cache_miss_tokens INTEGER NOT NULL DEFAULT 0"
+            )
         # Ephemeral bindings to providers this platform no longer serves.
         self.conn.execute(
             "DELETE FROM pool_sessions WHERE provider NOT IN (?, ?)",

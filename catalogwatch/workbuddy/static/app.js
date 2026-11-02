@@ -756,6 +756,11 @@
       fmt(item.bridge_account_id),
       badge(fmt(item.status_code), item.status_code >= 200 && item.status_code < 300 ? "free" : "bad"),
       fmt(item.total_tokens),
+      (() => {
+        const hit = Number(item.cache_hit_tokens || 0);
+        const prompt = Number(item.prompt_tokens || 0);
+        return prompt ? hit + " / " + prompt + " (" + Math.round((hit / prompt) * 100) + "%)" : "—";
+      })(),
       num(item.credits),
       fmt(item.cost_source),
       el("button", {
@@ -770,7 +775,7 @@
         },
       }),
     ]);
-    setView(card("请求账本", table(["请求", "会话", "时间（北京）", "模型", "账号", "状态", "Tokens", "积分", "成本来源", "详情"], rows)));
+    setView(card("请求账本", table(["请求", "会话", "时间（北京）", "模型", "账号", "状态", "Tokens", "缓存命中", "积分", "成本来源", "详情"], rows)));
   }
 
   // -------------------------------------------------------------------- policy

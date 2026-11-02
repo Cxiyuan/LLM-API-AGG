@@ -518,3 +518,35 @@ def test_streaming_endpoints_release_the_upstream_response():
     # A client can disconnect before Starlette starts iterating the body; the
     # background close is what prevents a leaked httpx pool slot.
     assert source.count("background=BackgroundTask(response.aclose)") == 3
+
+
+def test_usage_parses_prompt_cache_tokens():
+    from catalogwatch.workbuddy.gateway import _usage
+
+    usage = _usage(
+        {
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 10,
+                "total_tokens": 1010,
+                "prompt_cache_hit_tokens": 800,
+                "prompt_cache_miss_tokens": 200,
+                "credit": 0.5,
+            }
+        }
+    )
+    assert usage["cache_hit_tokens"] == 800
+    assert usage["cache_miss_tokens"] == 200
+
+    # Some providers report only the cache-read count; infer the miss side.
+    inferred = _usage(
+        {
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 1,
+                "cache_read_input_tokens": 400,
+            }
+        }
+    )
+    assert inferred["cache_hit_tokens"] == 400
+    assert inferred["cache_miss_tokens"] == 100

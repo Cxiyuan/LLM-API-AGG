@@ -31,12 +31,20 @@ class Reconciler:
             if not request_id:
                 continue
             attempts = max(1, int(row.get("attempts") or 1))
-            found = None
+            prompt = completion = total = 0
+            credits = 0.0
+            found = False
             failed = False
+            last_status = input_status = row.get("status_code")
+            try:
+                input_status = int(input_status) if input_status is not None else None
+            except (TypeError, ValueError):
+                input_status = None
+            last_finish = row.get("finish_reason")
             for attempt_no in range(1, attempts + 1):
                 try:
                     result = await self.bridge.search_logs(
-                        client_request_id=f"{request_id}:{attempt_no}", limit=5
+                        client_request_id=f"{request_id}:{attempt_no}", limit=20
                     )
                 except BridgeError as exc:
                     failed = True
@@ -45,18 +53,49 @@ class Reconciler:
                 items = result.get("items") if isinstance(result, dict) else []
                 if not isinstance(items, list):
                     continue
+                attempt_credits = 0.0
                 for item in items:
                     if not isinstance(item, dict):
                         continue
+                    found = True
+                    try:
+                        prompt += int(item.get("prompt_tokens") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        completion += int(item.get("completion_tokens") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        item_total = int(item.get("total_tokens") or 0)
+                    except (TypeError, ValueError):
+                        item_total = 0
+                    if not item_total:
+                        try:
+                            item_total = int(item.get("prompt_tokens") or 0) + int(
+                                item.get("completion_tokens") or 0
+                            )
+                        except (TypeError, ValueError):
+                            item_total = 0
+                    total += item_total
+                    try:
+                        item_credit = float(item.get("credit") or 0)
+                    except (TypeError, ValueError):
+                        item_credit = 0.0
+                    attempt_credits += item_credit
+                    credits += item_credit
                     try:
                         status = int(item.get("status_code") or 0)
                     except (TypeError, ValueError):
                         status = 0
-                    if 200 <= status < 300:
-                        found = item
-                        break
-                if found:
-                    break
+                    if status:
+                        last_status = status
+                    if item.get("finish_reason"):
+                        last_finish = item.get("finish_reason")
+                if attempt_credits or items:
+                    self.store.set_attempt_credits(
+                        request_id, attempt_no, round(attempt_credits, 6)
+                    )
 
             if failed:
                 bridge_failures += 1
@@ -65,38 +104,17 @@ class Reconciler:
                 self.store.mark_reconcile_unknown(request_id)
                 unknown += 1
                 continue
-
-            try:
-                prompt = int(found.get("prompt_tokens") or 0)
-            except (TypeError, ValueError):
-                prompt = 0
-            try:
-                completion = int(found.get("completion_tokens") or 0)
-            except (TypeError, ValueError):
-                completion = 0
-            try:
-                total = int(found.get("total_tokens") or 0)
-            except (TypeError, ValueError):
-                total = 0
             if not total:
                 total = prompt + completion
-            raw_credit = found.get("credit")
-            try:
-                credits = float(raw_credit) if raw_credit is not None else 0.0
-            except (TypeError, ValueError):
-                credits = 0.0
-            try:
-                status = int(found.get("status_code") or 200)
-            except (TypeError, ValueError):
-                status = 200
+            status = input_status if input_status is not None else (last_status or 200)
             self.store.reconcile_request(
                 request_id,
                 prompt_tokens=prompt,
                 completion_tokens=completion,
                 total_tokens=total,
-                credits=credits,
-                status_code=status,
-                finish_reason=found.get("finish_reason"),
+                credits=round(credits, 6),
+                status_code=int(status),
+                finish_reason=last_finish,
             )
             reconciled += 1
 

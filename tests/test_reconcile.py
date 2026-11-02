@@ -125,3 +125,87 @@ async def test_missing_log_marks_unknown(tmp_path):
     assert result["unknown"] == 1
     assert store.get_request("req-2")["cost_source"] == "unknown"
     db.close()
+
+
+class _MappedBridge:
+    def __init__(self, mapping):
+        self.mapping = mapping
+        self.calls = []
+
+    async def search_logs(self, **params):
+        client = str(params.get("client_request_id") or "")
+        self.calls.append(client)
+        return {"items": self.mapping.get(client, [])}
+
+
+async def test_reconcile_sums_every_attempt_including_canceled_output(tmp_path):
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    store.upsert_account(
+        {"id": 1, "provider": "workbuddy", "name": "main", "status": "active"}
+    )
+    store.start_request(
+        request_id="req-multi",
+        pool_key_id=None,
+        endpoint="chat",
+        model_requested="auto",
+        stream=True,
+        intent={},
+        routing=[],
+    )
+    for attempt_no, credit in ((1, 1.25), (2, 2.5)):
+        store.record_attempt(
+            request_id="req-multi",
+            attempt_no=attempt_no,
+            account_id=1,
+            model_id="deepseek-v4-flash",
+            provider="workbuddy",
+            status_code=200,
+            error_code=None,
+            started_at=utcnow_iso(),
+            duration_ms=10,
+            credits=None,
+        )
+    store.finish_request(
+        "req-multi",
+        status_code=200,
+        attempts=2,
+        credits=0,
+        cost_source="upstream",
+    )
+    bridge = _MappedBridge(
+        {
+            "req-multi:1": [
+                {
+                    "status_code": 200,
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "total_tokens": 110,
+                    "credit": 1.25,
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "req-multi:2": [
+                {
+                    "status_code": 200,
+                    "prompt_tokens": 200,
+                    "completion_tokens": 20,
+                    "total_tokens": 220,
+                    "credit": 2.5,
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    )
+    result = await Reconciler(store, bridge).reconcile(older_than_seconds=0)
+    assert result["reconciled"] == 1
+    request = store.get_request("req-multi")
+    assert request["credits"] == 3.75
+    assert request["total_tokens"] == 330
+    assert request["prompt_tokens"] == 300
+    assert request["completion_tokens"] == 30
+    assert request["cost_source"] == "reconciled"
+    attempts = store.list_attempts("req-multi")
+    assert [item["credits"] for item in attempts] == [1.25, 2.5]
+    assert bridge.calls == ["req-multi:1", "req-multi:2"]
+    db.close()

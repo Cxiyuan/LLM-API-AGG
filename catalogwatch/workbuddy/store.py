@@ -1127,6 +1127,8 @@ class WorkBuddyStore:
             "prompt_tokens",
             "completion_tokens",
             "total_tokens",
+            "cache_hit_tokens",
+            "cache_miss_tokens",
             "credits",
             "credits_estimated",
             "effective_credits",
@@ -1227,18 +1229,37 @@ class WorkBuddyStore:
     def pending_requests(
         self, limit: int = 50, *, older_than_seconds: int = 30
     ) -> list[dict]:
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=max(0, older_than_seconds))
-        ).isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(seconds=max(0, older_than_seconds))).isoformat(
+            timespec="seconds"
+        )
+        stale = (now - timedelta(seconds=max(600, older_than_seconds))).isoformat(
+            timespec="seconds"
+        )
         rows = self.conn.execute(
             """
             SELECT * FROM pool_requests
-             WHERE cost_source='pending' AND created_at <= ?
-             ORDER BY id LIMIT ?
+             WHERE reconciled_at IS NULL
+               AND created_at <= ?
+               AND (
+                    status_code IS NOT NULL
+                    OR cost_source='pending'
+                    OR created_at <= ?
+               )
+             ORDER BY id DESC LIMIT ?
             """,
-            (cutoff, max(1, min(200, int(limit)))),
+            (cutoff, stale, max(1, min(200, int(limit)))),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def set_attempt_credits(
+        self, request_id: str, attempt_no: int, credits: float | None
+    ) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE pool_request_attempts SET credits=? WHERE request_id=? AND attempt_no=?",
+                (credits, request_id, int(attempt_no)),
+            )
 
     def reconcile_request(
         self,
@@ -1317,22 +1338,16 @@ class WorkBuddyStore:
                     """,
                     (delta_tokens, delta_credits, now, int(account_id)),
                 )
-            attempt_no = int(row["attempts"] or 1)
-            self.conn.execute(
-                """
-                UPDATE pool_request_attempts SET credits=?, status_code=?
-                WHERE request_id=? AND attempt_no=?
-                """,
-                (new_credits, int(status_code), request_id, attempt_no),
-            )
         return True
 
     def mark_reconcile_unknown(self, request_id: str) -> None:
         with self.lock, self.conn:
             self.conn.execute(
                 """
-                UPDATE pool_requests SET cost_source='unknown', reconciled_at=?
-                WHERE request_id=? AND cost_source='pending'
+                UPDATE pool_requests SET
+                    cost_source=CASE WHEN cost_source='pending' THEN 'unknown' ELSE cost_source END,
+                    reconciled_at=?
+                WHERE request_id=? AND reconciled_at IS NULL
                 """,
                 (utcnow_iso(), request_id),
             )

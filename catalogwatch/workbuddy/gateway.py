@@ -127,7 +127,14 @@ def _next_reset() -> str:
 
 def _usage(body: Any) -> dict:
     if not isinstance(body, dict):
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "credit": None}
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 0,
+            "credit": None,
+        }
     usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
     prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
     completion = usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
@@ -135,6 +142,19 @@ def _usage(body: Any) -> dict:
     credit = usage.get("credit")
     if credit is None and "credit" in body:
         credit = body.get("credit")
+    details = usage.get("prompt_tokens_details")
+    cache_hit_raw = (
+        usage.get("prompt_cache_hit_tokens")
+        if usage.get("prompt_cache_hit_tokens") is not None
+        else usage.get("cache_read_input_tokens")
+    )
+    if cache_hit_raw is None and isinstance(details, dict):
+        cache_hit_raw = details.get("cached_tokens")
+    cache_miss_raw = (
+        usage.get("prompt_cache_miss_tokens")
+        if usage.get("prompt_cache_miss_tokens") is not None
+        else usage.get("cache_creation_input_tokens")
+    )
     try:
         prompt = int(prompt)
     except (TypeError, ValueError):
@@ -151,6 +171,16 @@ def _usage(body: Any) -> dict:
         credit = float(credit) if credit is not None else None
     except (TypeError, ValueError):
         credit = None
+    try:
+        cache_hit = max(0, int(cache_hit_raw or 0))
+    except (TypeError, ValueError):
+        cache_hit = 0
+    try:
+        cache_miss = max(0, int(cache_miss_raw or 0))
+    except (TypeError, ValueError):
+        cache_miss = 0
+    if cache_hit and not cache_miss and prompt >= cache_hit:
+        cache_miss = prompt - cache_hit
     finish = None
     choices = body.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
@@ -161,6 +191,8 @@ def _usage(body: Any) -> dict:
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": total,
+        "cache_hit_tokens": cache_hit,
+        "cache_miss_tokens": cache_miss,
         "credit": credit,
         "finish_reason": finish,
     }
@@ -324,6 +356,8 @@ class PoolGateway:
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=total,
+            cache_hit_tokens=int(usage.get("cache_hit_tokens") or 0),
+            cache_miss_tokens=int(usage.get("cache_miss_tokens") or 0),
             credits=credit,
             credits_estimated=0,
             effective_credits=attempt.effective_credits,
@@ -798,7 +832,15 @@ class PoolGateway:
         bind_session: bool = False,
     ) -> AsyncIterator[bytes]:
         buffer = b""
-        last_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "credit": None, "finish_reason": None}
+        last_usage: dict = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 0,
+            "credit": None,
+            "finish_reason": None,
+        }
         stream_error: Any = None
         saw_done = False
         saw_finish = False
@@ -850,7 +892,11 @@ class PoolGateway:
                         stream_error = value.get("error")
                     if isinstance(value.get("usage"), dict):
                         merged = _usage(value)
-                        if merged.get("total_tokens") or merged.get("credit") is not None:
+                        if (
+                            merged.get("total_tokens")
+                            or merged.get("credit") is not None
+                            or merged.get("cache_hit_tokens")
+                        ):
                             last_usage = merged
                 yield chunk
             latency = int((time.monotonic() - started) * 1000)
