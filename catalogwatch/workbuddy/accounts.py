@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 from .bridge import BridgeError, BuddyBridge
+from .providers import WORKBUDDY_PROVIDERS
 from .store import WorkBuddyStore
 
 
@@ -49,7 +50,8 @@ class WorkBuddyAccounts:
         missing = [
             row["account_id"]
             for row in self.store.list_accounts(present=True)
-            if int(row["account_id"]) not in seen
+            if str(row.get("provider") or "workbuddy") in WORKBUDDY_PROVIDERS
+            and int(row["account_id"]) not in seen
         ]
         if missing:
             semaphore = asyncio.Semaphore(2)
@@ -130,6 +132,15 @@ class WorkBuddyAccounts:
 
     async def settings(self) -> dict:
         return await self.bridge.get_settings()
+
+    async def add_account(self, payload: dict) -> dict:
+        """Import a pasted credential for a non-WorkBuddy bridge channel."""
+        result = await self.bridge.add_account(payload)
+        await self.sync()
+        return result
+
+    async def channels(self) -> dict:
+        return await self.bridge.channels()
 
     async def update_settings(self, payload: dict) -> dict:
         return await self.bridge.update_settings(payload)

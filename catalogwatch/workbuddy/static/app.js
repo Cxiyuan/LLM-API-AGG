@@ -337,6 +337,65 @@
       ];
     });
 
+    const channelSelect = el(
+      "select",
+      {},
+      ...[
+        ["qoder", "Qoder 中国"],
+        ["qoder-i", "Qoder 国际"],
+        ["qwenwork", "千问办公"],
+        ["traework", "TraeWork"],
+      ].map(([value, label]) => el("option", { value, text: label }))
+    );
+    const channelCred = el("textarea", {
+      class: "channel-json",
+      rows: 5,
+      placeholder: '{"access_token":"PAT / access_token","refresh_token":"可空"}',
+    });
+    channelCred.value = '{\n  "access_token": ""\n}';
+    const channelImport = el(
+      "div",
+      { class: "card" },
+      el("p", {
+        class: "muted",
+        text: "Qoder 可直接粘贴 PAT；千问办公 / TraeWork 粘贴 token 或 refreshToken。WorkBuddy 仍走上方的浏览器授权。",
+      }),
+      el("div", { class: "toolbar" }, channelSelect, el("button", {
+        class: "primary",
+        text: "导入渠道账号",
+        onclick: async () => {
+          let payload;
+          try {
+            payload = JSON.parse(channelCred.value || "{}");
+          } catch (error) {
+            alert("凭据必须是合法 JSON：" + (error.message || error));
+            return;
+          }
+          if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            alert("凭据必须是 JSON 对象");
+            return;
+          }
+          payload.provider = channelSelect.value;
+          try {
+            const result = await api("/api/workbuddy/accounts/add", {
+              method: "POST",
+              body: JSON.stringify(payload),
+            });
+            alert("已导入账号 #" + result.id);
+            channelCred.value = '{\n  "access_token": ""\n}';
+            await loadAccounts();
+          } catch (error) {
+            alert(error.message || String(error));
+          }
+        },
+      })),
+      channelCred,
+      el("p", {
+        class: "muted",
+        text: "凭据只写入 Buddy2api 的加密数据库；本控制台不保存 token。容器跑在 Linux 时，千问办公需要在原生客户端登录后导出 token 再粘贴。",
+      })
+    );
+
     setView(
       el(
         "div",
@@ -345,6 +404,7 @@
           class: "muted",
           text: "国际版添加账号时，如果浏览器已登录 workbuddy.ai，普通窗口会复用该会话；请点“添加账号”后复制授权链接到无痕/隐私窗口打开。",
         }), flow, items.length ? table(["账号", "状态", "可用积分", "30天到期", "今日用量", "冷却（北京）", "签到", "操作"], rows) : el("p", { class: "muted", text: "还没有账号。选择区域后点“添加账号”，在浏览器完成 WorkBuddy 授权。" })),
+        channelImport,
         card("说明", el("p", { class: "muted", text: "账号 token 只保存在 Buddy2api 的加密数据库里；本控制台只保存账号 ID、额度快照和用量。" }))
       )
     );

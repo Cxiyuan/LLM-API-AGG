@@ -79,21 +79,21 @@ async def list_models(request: Request) -> dict:
             "object": "model",
             "created": 0,
             "owned_by": "llm-agg",
-            "description": "Global cost/load-aware selection across your WorkBuddy accounts: free first, then low multiplier",
+            "description": "Global cost/load-aware selection across all enabled bridge channels: free/quota first, then low multiplier",
         },
         {
             "id": "free",
             "object": "model",
             "created": 0,
             "owned_by": "llm-agg",
-            "description": "Only WorkBuddy models that are free at the current time",
+            "description": "Only models that are free or covered by a non-WorkBuddy channel quota at the current time",
         },
         {
             "id": "cheap",
             "object": "model",
             "created": 0,
             "owned_by": "llm-agg",
-            "description": "Lowest current effective WorkBuddy multiplier",
+            "description": "Lowest current effective multiplier across enabled bridge channels",
         },
     ]
     resources = list(service.catalog.list_costs())

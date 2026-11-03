@@ -14,6 +14,7 @@ from ..util import utcnow_iso
 from .accounts import WorkBuddyAccounts
 from .bridge import BuddyBridge
 from .catalog import WorkBuddyCatalog, cost_summary
+from .providers import BRIDGE_PROVIDER_ORDER
 from .gateway import PoolGateway
 from .reconcile import Reconciler
 from .router import PoolRouter
@@ -31,6 +32,20 @@ def _seconds(store: WorkBuddyStore, key: str, default: int, minimum: int, maximu
     return max(minimum, min(maximum, parsed))
 
 
+def _configured_providers() -> tuple[str, ...]:
+    """Channels the pool should scan; unknown/disabled names are ignored.
+
+    Buddy2api still decides whether a channel is loaded.  Keeping this list
+    explicit means a bridge upgrade cannot silently make the pool route a
+    channel whose billing/account shape we have not reviewed.
+    """
+    raw = os.environ.get("WORKBUDDY_PROVIDERS", "").strip()
+    if not raw:
+        return BRIDGE_PROVIDER_ORDER
+    wanted = {part.strip() for part in raw.split(",") if part.strip()}
+    return tuple(provider for provider in BRIDGE_PROVIDER_ORDER if provider in wanted)
+
+
 class WorkBuddyService:
     def __init__(self, db: Database):
         self.store = WorkBuddyStore(db)
@@ -46,7 +61,9 @@ class WorkBuddyService:
             gateway_key=os.environ.get("WORKBUDDY_GATEWAY_KEY", ""),
             timeout=bridge_timeout,
         )
-        self.catalog = WorkBuddyCatalog(self.store, self.bridge)
+        self.catalog = WorkBuddyCatalog(
+            self.store, self.bridge, providers=_configured_providers()
+        )
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)
         self.router = PoolRouter(self.store, self.catalog)
         self.gateway = PoolGateway(self.store, self.router, self.bridge)

@@ -17,6 +17,7 @@ from typing import Any
 from ..util import utcnow_iso
 from .bridge import BridgeError, BuddyBridge
 from .model_filter import is_text_chat_model
+from .providers import WORKBUDDY_PROVIDERS
 from .promotions import (
     DEFAULT_TIMEZONE,
     group_promotions,
@@ -34,7 +35,7 @@ class WorkBuddyCatalog:
         self,
         store: WorkBuddyStore,
         bridge: BuddyBridge,
-        providers: tuple[str, ...] = ("workbuddy", "workbuddy-i"),
+        providers: tuple[str, ...] = WORKBUDDY_PROVIDERS,
     ):
         self.store = store
         self.bridge = bridge
@@ -127,7 +128,8 @@ class WorkBuddyCatalog:
 
         config: dict | None = None
         config_error = None
-        if has_account:
+        is_workbuddy = provider in WORKBUDDY_PROVIDERS
+        if has_account and is_workbuddy:
             try:
                 config = await self.bridge.workbuddy_config(
                     provider, identity=identity, force=force
@@ -192,9 +194,24 @@ class WorkBuddyCatalog:
                 if is_text_chat_model(item.get("id"), item.get("name"))
             ]
             filtered_out = served_count - len(merged)
+            if not is_workbuddy:
+                # Qoder / QwenWork / TraeWork are quota-backed coding
+                # channels. Their /v1/models rows do not carry WorkBuddy
+                # credit multipliers, so treat a request as quota-covered
+                # instead of unknown-priced (which would be filtered out by
+                # the WorkBuddy full-price guard).
+                for item in merged:
+                    if item.get("credits") is None:
+                        item["credits"] = 0.0
+                    if not item.get("credits_raw"):
+                        item["credits_raw"] = "quota"
+                    item["quota"] = True
             self.store.upsert_models(provider, merged, source_identity=identity)
 
-            if config and config.get("promotions_available"):
+            if not is_workbuddy:
+                warning = None
+                promotion_count = 0
+            elif config and config.get("promotions_available"):
                 grouped = group_promotions(config.get("modelPromotions"))
                 self.store.replace_promotions(
                     provider, grouped, source_identity=identity

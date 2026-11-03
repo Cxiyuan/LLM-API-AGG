@@ -223,3 +223,41 @@ async def test_catalog_falls_back_to_desktop_for_promotions(tmp_path):
     assert snapshot["identity"] == "desktop"
     assert "desktop" in bridge.config_calls
     db.close()
+
+
+async def test_quota_channel_uses_served_models_without_workbuddy_config(tmp_path):
+    """Qoder/千问/Trae 没有 WorkBuddy 积分目录：按通道额度接入，不能因 credits 为空被过滤。"""
+    db = Database(tmp_path / "catalog.db")
+    store = WorkBuddyStore(db)
+    store.upsert_account(
+        {
+            "id": 9,
+            "provider": "qoder",
+            "name": "qoder",
+            "status": "active",
+            "weight": 1,
+            "priority": 0,
+        }
+    )
+    bridge = _FakeCatalogBridge(
+        [
+            {
+                "id": "qoder/Qwen3.8-Flash",
+                "channel": "qoder",
+                "name": "Qwen3.8-Flash",
+                "supportsToolCall": True,
+                "context_window": 200000,
+            }
+        ]
+    )
+    catalog = WorkBuddyCatalog(store, bridge, providers=("qoder",))
+    result = await catalog.refresh()
+
+    assert bridge.config_calls == []
+    assert result[0]["models"] == 1
+    assert result[0]["warning"] is None
+    stored = store.list_models("qoder")
+    assert [item["model_id"] for item in stored] == ["Qwen3.8-Flash"]
+    cost = catalog.effective_cost("qoder", "Qwen3.8-Flash")
+    assert cost is not None and cost["credits"] == 0.0 and cost["free"] is True
+    db.close()

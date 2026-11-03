@@ -199,6 +199,13 @@ class BuddyBridge:
     async def import_accounts(self, payload: dict) -> dict:
         return await self._admin_post("/admin/accounts/import", payload)
 
+    async def add_account(self, payload: dict) -> dict:
+        """Direct credential import for a channel that supports pasted tokens."""
+        return await self._admin_post("/admin/accounts", payload)
+
+    async def channels(self) -> dict:
+        return await self._admin_get("/admin/channels")
+
     async def login_start(self, realm: str = "cn") -> dict:
         return await self._admin_post("/admin/workbuddy/login/start", {"realm": realm})
 

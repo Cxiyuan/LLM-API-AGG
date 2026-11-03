@@ -23,6 +23,7 @@ from .auth import (
     set_session_cookies,
 )
 from .promotions import parse_clock_minutes
+from .providers import BRIDGE_PROVIDERS, WORKBUDDY_PROVIDERS
 from .router import DEFAULT_POLICY
 from .schedule import (
     DEFAULT_DAY_PRIORITY,
@@ -170,7 +171,7 @@ async def set_manual_cost(request: Request) -> dict:
     body = await _body(request)
     provider = str(body.get("provider") or "").strip()
     model_id = str(body.get("model_id") or "").strip()
-    if provider not in {"workbuddy", "workbuddy-i"} or not model_id:
+    if provider not in BRIDGE_PROVIDERS or not model_id:
         raise HTTPException(status_code=400, detail="provider and model_id are required")
     windows = body.get("daily_windows")
     if windows is not None and not isinstance(windows, list):
@@ -195,7 +196,7 @@ async def delete_manual_cost(request: Request) -> dict:
     service, actor = _admin(request, mutation=True)
     provider = str(request.query_params.get("provider") or "").strip()
     model_id = str(request.query_params.get("model_id") or "").strip()
-    if provider not in {"workbuddy", "workbuddy-i"} or not model_id:
+    if provider not in BRIDGE_PROVIDERS or not model_id:
         raise HTTPException(status_code=400, detail="provider and model_id are required")
     service.store.delete_manual_cost(provider, model_id)
     _audit(service, actor, "model.manual_cost.delete", f"{provider}/{model_id}")
@@ -235,6 +236,40 @@ async def login_poll(request: Request, state: str = "") -> dict:
     result = await service.accounts.login_poll(state)
     if isinstance(result, dict) and result.get("done"):
         _audit(service, actor="session", action="account.login.done", payload=result)
+    return result
+
+
+@router.get("/workbuddy/channels")
+async def bridge_channels(request: Request) -> dict:
+    service, _actor = _admin(request)
+    return await service.accounts.channels()
+
+
+@router.post("/workbuddy/accounts/add")
+async def add_account(request: Request) -> dict:
+    """Paste-token import for Qoder / QwenWork / TraeWork.
+
+    WorkBuddy still uses the browser OAuth flow; the other channels expose a
+    provider-specific credential parser, so their tokens are pasted here and
+    stored only in the bridge's encrypted database.
+    """
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    provider = str(body.get("provider") or body.get("channel") or "").strip()
+    if provider not in BRIDGE_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"unsupported provider: {provider}")
+    if provider in WORKBUDDY_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail="WorkBuddy 请在页面上点“添加账号”走浏览器授权；粘贴导入只用于 Qoder/QwenWork/TraeWork",
+        )
+    body["provider"] = provider
+    result = await service.accounts.add_account(body)
+    try:
+        await service.refresh_catalog(force=True)
+    except Exception:  # noqa: BLE001 - import already succeeded; catalog can retry later
+        pass
+    _audit(service, actor, "accounts.add", None, {"provider": provider})
     return result
 
 

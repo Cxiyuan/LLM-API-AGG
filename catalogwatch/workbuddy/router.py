@@ -14,6 +14,7 @@ from ..util import local_day, utcnow_iso
 from .catalog import WorkBuddyCatalog
 from .load import LoadTracker
 from .model_filter import is_text_chat_model, is_tool_capable_model
+from .providers import BRIDGE_PROVIDER_ORDER, BRIDGE_PROVIDERS
 from .schedule import (
     DEFAULT_DAY_PRIORITY,
     DEFAULT_NIGHT_PRIORITY,
@@ -25,8 +26,6 @@ from .schedule import (
 from .store import WorkBuddyStore
 
 ALIASES = {"auto", "free", "cheap"}
-# The only model sources this platform serves: WorkBuddy CN and INTL.
-BRIDGE_PROVIDERS = {"workbuddy", "workbuddy-i"}
 
 DEFAULT_POLICY: dict[str, Any] = {
     "prefer_free": True,
@@ -266,14 +265,14 @@ class PoolRouter:
         return f"{cost.get('provider')}/{cost.get('model_id')}"
 
     def _candidates(self) -> list[dict]:
-        """Every callable model resource: WorkBuddy only."""
+        """Every callable model resource from an enabled bridge channel."""
         costs: list[dict] = []
         if self.store.list_accounts(present=True):
             for item in self.catalog.list_costs():
                 if not item.get("present", True):
                     continue
                 item = dict(item)
-                item["source"] = "workbuddy"
+                item["source"] = str(item.get("provider") or "workbuddy")
                 costs.append(item)
         return costs
 
@@ -358,9 +357,9 @@ class PoolRouter:
                 404,
             )
 
-        # Explicit WorkBuddy models may be newer than our catalog. Preserve the
+        # Explicit bridge models may be newer than our catalog. Preserve the
         # request and let the bridge return its own error if the model is invalid.
-        providers = [provider] if provider else ["workbuddy", "workbuddy-i"]
+        providers = [provider] if provider else list(BRIDGE_PROVIDER_ORDER)
         return [
             {
                 "provider": item,
@@ -842,7 +841,7 @@ class PoolRouter:
                         account_state=state,
                         free=bool(cost.get("free")),
                         effective_credits=cost.get("credits"),
-                        source="workbuddy",
+                        source=provider,
                     )
                 )
                 if len(attempts) >= max_attempts:

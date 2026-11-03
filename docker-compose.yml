@@ -32,6 +32,9 @@ services:
     environment:
       CB_GATEWAY_ADMIN_TOKEN: ${CB_GATEWAY_ADMIN_TOKEN:-}
       CB_GATEWAY_MASTER_KEY: ${CB_GATEWAY_MASTER_KEY:-}
+      # 允许 Buddy2api 加载的多渠道；没有导入账号的通道会自动跳过。
+      CB_GATEWAY_PROVIDERS: ${CB_GATEWAY_PROVIDERS:-workbuddy,workbuddy-i,qoder,qoder-i,qwenwork,traework}
+      WORKBUDDY_PROVIDERS: ${WORKBUDDY_PROVIDERS:-workbuddy,workbuddy-i,qoder,qoder-i,qwenwork,traework}
       CATALOGWATCH_ADMIN_USER: ${CATALOGWATCH_ADMIN_USER:-admin}
       CATALOGWATCH_ADMIN_PASSWORD: ${CATALOGWATCH_ADMIN_PASSWORD:-admin}
       CATALOGWATCH_ADMIN_TOKEN: ${CATALOGWATCH_ADMIN_TOKEN:-}
