@@ -365,7 +365,7 @@ class WorkBuddyService:
         except Exception:  # noqa: BLE001
             log.exception("workbuddy credit refresh failed")
         try:
-            if has_accounts and now - last["catalog"] >= catalog_interval:
+            if (has_accounts or self.openbridge.configured) and now - last["catalog"] >= catalog_interval:
                 await self.refresh_catalog(force=True)
                 last["catalog"] = now
         except Exception:  # noqa: BLE001
