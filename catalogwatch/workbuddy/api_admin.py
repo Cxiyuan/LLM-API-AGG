@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from ..util import utcnow_iso
+from .bridge import BridgeError
 from .auth import (
     clear_login_failures,
     clear_session_cookies,
@@ -264,7 +265,13 @@ async def add_account(request: Request) -> dict:
             detail="WorkBuddy 请在页面上点“添加账号”走浏览器授权；粘贴导入只用于 Qoder/QwenWork/TraeWork",
         )
     body["provider"] = provider
-    result = await service.accounts.add_account(body)
+    try:
+        result = await service.accounts.add_account(body)
+    except BridgeError as exc:
+        raise HTTPException(
+            status_code=exc.status_code if 400 <= exc.status_code < 500 else 502,
+            detail=str(exc),
+        ) from exc
     try:
         await service.refresh_catalog(force=True)
     except Exception:  # noqa: BLE001 - import already succeeded; catalog can retry later

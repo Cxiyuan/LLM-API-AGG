@@ -201,10 +201,11 @@ class WorkBuddyCatalog:
                 # instead of unknown-priced (which would be filtered out by
                 # the WorkBuddy full-price guard).
                 for item in merged:
-                    if item.get("credits") is None:
-                        item["credits"] = 0.0
-                    if not item.get("credits_raw"):
-                        item["credits_raw"] = "quota"
+                    # These channels meter their own quota, not WorkBuddy
+                    # credits. Keep them out of the credit-multiplier guard
+                    # even if an upstream catalog happens to include a price.
+                    item["credits"] = 0.0
+                    item["credits_raw"] = "quota"
                     item["quota"] = True
             self.store.upsert_models(provider, merged, source_identity=identity)
 
