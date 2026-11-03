@@ -819,9 +819,11 @@ app.get('/openbridge', async (c) => {
           <button class="button primary" type="submit">创建 Provider</button>
         </form>
       </article>
-      <article class="panel"><div class="panel-head"><div><h2>导入 Session Package</h2><p>粘贴 session_extractor 生成的 JSON</p></div></div>
+      <article class="panel"><div class="panel-head"><div><h2>导入 Session Package</h2><p>粘贴 session_extractor 生成的 JSON；新 ID 会自动创建 Provider</p></div></div>
         <form method="post" action="/actions/openbridge/session" class="stack">
-          <label class="field"><span>Provider</span><select name="provider">${providers.map((provider) => html`<option value="${provider.id}">${provider.id}</option>`)}</select></label>
+          <label class="field"><span>Provider ID</span><input name="provider" list="openbridge-provider-ids" placeholder="例如 qwen-web" required></label>
+          <datalist id="openbridge-provider-ids">${providers.map((provider) => html`<option value="${provider.id}"></option>`)}</datalist>
+          <p class="hint">已有 Provider 可直接选择；填一个新 ID 时，OpenBridge 会从 Session Package 的 transport/integration 自动推断并创建 Provider。</p>
           <label class="field"><span>Session Package JSON</span><textarea name="package" rows="10" placeholder='{"schemaVersion":1,"source":"...","capturedAt":"...","origin":"https://..."}' required></textarea></label>
           <button class="button primary" type="submit">安装会话包</button>
         </form>
