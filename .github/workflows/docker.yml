@@ -118,8 +118,10 @@ jobs:
           curl -fsS -H "Authorization: Bearer $KEY" \
             http://127.0.0.1:18787/v1/models
 
-          # Console: LLM-API-AGG branding + admin session/token auth.
-          curl -fsS http://127.0.0.1:18788/ | grep -q "LLM-API-AGG"
+          # Console: Hono login page + admin session/token auth. `/` redirects
+          # to `/login` when unauthenticated, so probe the rendered page.
+          curl -fsS http://127.0.0.1:18788/login | grep -q "LLM-API-AGG"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18788/)" = "303"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18788/api/overview)" = "401"
           ADMIN="$(docker exec free-llm-smoke cat /data/secrets/catalogwatch_admin_token)"
           test -n "$ADMIN"

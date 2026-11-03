@@ -11,3 +11,5 @@ __pycache__
 tests
 vendor/buddy2api/docs
 vendor/buddy2api/tests
+
+ui/node_modules

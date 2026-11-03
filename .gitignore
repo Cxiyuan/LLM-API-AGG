@@ -9,3 +9,5 @@ data/
 *.db-shm
 exports/
 README.md
+
+ui/node_modules/

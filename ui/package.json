@@ -1,0 +1,11 @@
+{
+  "name": "llm-api-agg-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Enterprise console for LLM-API-AGG unified model gateway",
+  "dependencies": {
+    "@hono/node-server": "^1.19.6",
+    "hono": "^4.10.4"
+  }
+}
