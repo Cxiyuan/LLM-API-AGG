@@ -19,8 +19,7 @@ def test_console_auth_and_empty_accounts(tmp_path, monkeypatch):
 
     app = create_app(_settings(tmp_path))
     with TestClient(app) as client:
-        assert client.get("/").status_code == 200
-        assert "LLM-API-AGG" in client.get("/").text
+        assert client.get("/", follow_redirects=False).status_code == 307
 
         unauthorized = client.get("/api/overview")
         assert unauthorized.status_code == 401

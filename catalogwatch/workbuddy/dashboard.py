@@ -1,22 +1,21 @@
-"""Serve the single-page unified model gateway console."""
+"""Legacy console entry point.
+
+The Hono console owns the web UI on port 80.  The API process keeps a small
+root route only to send anyone who opens the API port to the new console; /v1
+and /api stay on their original port.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import RedirectResponse
 
 router = APIRouter()
-_STATIC = Path(__file__).parent / "static"
 
 
-@router.get("/", response_class=HTMLResponse)
-@router.get("/ui", response_class=HTMLResponse)
-def index() -> HTMLResponse:
-    return HTMLResponse(
-        (_STATIC / "index.html").read_text(encoding="utf-8"),
-        # The SPA shell changes with asset versions; never let a browser keep
-        # an old shell that still points at removed API endpoints.
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-    )
+@router.get("/")
+@router.get("/ui")
+def index(request: Request) -> RedirectResponse:
+    host = request.url.hostname or "127.0.0.1"
+    scheme = request.url.scheme if request.url.scheme in {"http", "https"} else "http"
+    return RedirectResponse(f"{scheme}://{host}/", status_code=307)

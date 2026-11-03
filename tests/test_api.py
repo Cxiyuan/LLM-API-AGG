@@ -49,11 +49,9 @@ def test_admin_auth_and_console(tmp_path, monkeypatch):
         assert "overview" in payload
         assert "bridge" in payload
 
-        page = client.get("/")
-        assert page.status_code == 200
-        assert "LLM-API-AGG" in page.text
-        assert "免费目录" not in page.text
-        assert "厂商 Key" not in page.text
+        page = client.get("/", follow_redirects=False)
+        assert page.status_code == 307
+        assert page.headers["location"].rstrip("/") == "http://testserver"
 
 
 def test_removed_catalog_modules_are_gone():
