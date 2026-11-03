@@ -140,11 +140,13 @@ class OpenBridgeClient:
             raise OpenBridgeError(response.status_code, response.text[:500])
         return response
 
-    async def open_chat_stream(self, payload: dict) -> httpx.Response:
+    async def open_chat_stream(
+        self, payload: dict, headers: dict[str, str] | None = None
+    ) -> httpx.Response:
         request = self._client.build_request(
             "POST",
             "/v1/chat/completions",
-            headers=self._headers(),
+            headers={**self._headers(), **(headers or {})},
             json=payload,
         )
         try:

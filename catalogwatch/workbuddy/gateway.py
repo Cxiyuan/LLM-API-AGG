@@ -319,7 +319,7 @@ class PoolGateway:
                 raise OpenBridgeError(400, "OpenBridge does not expose /v1/responses")
             if self.openbridge is None or not self.openbridge.configured:
                 raise OpenBridgeError(503, "OpenBridge channel is not configured")
-            return await self.openbridge.open_chat_stream(body)
+            return await self.openbridge.open_chat_stream(body, headers)
         if endpoint == "responses":
             return await self.bridge.open_responses_stream(body, headers)
         return await self.bridge.open_chat_stream(body, headers)
