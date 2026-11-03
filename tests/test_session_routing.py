@@ -135,6 +135,9 @@ def test_paid_session_binding_yields_to_a_newly_available_free_model(tmp_path):
         account_id=1,
         ttl_seconds=1800,
     )
+    # This test is about free-first binding, not the night priority map. Pin
+    # the scheduler to daytime so the assertion is independent of CI wall time.
+    store.set_setting("policy", {"allow_night": False})
     router = PoolRouter(store, WorkBuddyCatalog(store, None), LoadTracker())
     key = {"id": 1, "allowed_models": None, "max_attempts": 3}
     intent = extract_intent(
