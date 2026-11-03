@@ -1,4 +1,4 @@
-"""Console/admin JSON API for the WorkBuddy pool."""
+"""Console/admin JSON API for the unified model gateway."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ router = APIRouter(prefix="/api")
 def _service(request: Request) -> WorkBuddyService:
     service = getattr(request.app.state, "workbuddy", None)
     if service is None:
-        raise HTTPException(status_code=503, detail="WorkBuddy pool is not initialized")
+        raise HTTPException(status_code=503, detail="model gateway is not initialized")
     return service
 
 
@@ -125,10 +125,21 @@ async def overview(request: Request) -> dict:
             )
     except Exception as exc:  # noqa: BLE001 - health is best effort
         bridge = {"ok": False, "error": str(exc)[:300]}
+    openbridge: dict = {"ok": False, "configured": service.openbridge.configured}
+    if service.openbridge.configured:
+        try:
+            openbridge = {
+                **openbridge,
+                **(await asyncio.wait_for(service.openbridge.health(), timeout=3.0)),
+                "ok": True,
+            }
+        except Exception as exc:  # noqa: BLE001 - health is best effort
+            openbridge = {**openbridge, "error": str(exc)[:300]}
     return {
         "ok": True,
         "overview": service.overview(),
         "bridge": bridge,
+        "openbridge": openbridge,
         "policy": service.router.policy() if hasattr(service, "router") else service.store.get_setting("policy", DEFAULT_POLICY),
         "settings": {
             "catalog_refresh_seconds": service.store.get_setting("catalog_refresh_seconds", 60),

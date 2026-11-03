@@ -1,7 +1,7 @@
 [project]
 name = "catalogwatch"
 version = "0.2.0"
-description = "WorkBuddy multi-account pool gateway and console"
+description = "LLM-API-AGG: unified multi-channel model aggregation gateway"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",

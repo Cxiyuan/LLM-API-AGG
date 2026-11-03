@@ -1,4 +1,4 @@
-"""WorkBuddy pool service: bridge client + periodic catalog/credit loops."""
+"""Unified gateway service: bridge/channel clients + periodic catalog/credit loops."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ from ..util import utcnow_iso
 from .accounts import WorkBuddyAccounts
 from .bridge import BuddyBridge
 from .catalog import WorkBuddyCatalog, cost_summary
-from .providers import BRIDGE_PROVIDER_ORDER
+from .providers import BUDDY_PROVIDER_ORDER, OPENBRIDGE_PROVIDER
 from .gateway import PoolGateway
+from .openbridge import OpenBridgeCatalog, OpenBridgeClient
 from .reconcile import Reconciler
 from .router import PoolRouter
 from .store import WorkBuddyStore
@@ -41,9 +42,9 @@ def _configured_providers() -> tuple[str, ...]:
     """
     raw = os.environ.get("WORKBUDDY_PROVIDERS", "").strip()
     if not raw:
-        return BRIDGE_PROVIDER_ORDER
+        return BUDDY_PROVIDER_ORDER
     wanted = {part.strip() for part in raw.split(",") if part.strip()}
-    return tuple(provider for provider in BRIDGE_PROVIDER_ORDER if provider in wanted)
+    return tuple(provider for provider in BUDDY_PROVIDER_ORDER if provider in wanted)
 
 
 class WorkBuddyService:
@@ -65,8 +66,16 @@ class WorkBuddyService:
             self.store, self.bridge, providers=_configured_providers()
         )
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)
+        self.openbridge = OpenBridgeClient(
+            os.environ.get("OPENBRIDGE_URL", ""),
+            api_key=os.environ.get("OPENBRIDGE_API_KEY", ""),
+            timeout=bridge_timeout,
+        )
+        self.openbridge_catalog = OpenBridgeCatalog(self.store, self.openbridge)
         self.router = PoolRouter(self.store, self.catalog)
-        self.gateway = PoolGateway(self.store, self.router, self.bridge)
+        self.gateway = PoolGateway(
+            self.store, self.router, self.bridge, openbridge=self.openbridge
+        )
         self.reconciler = Reconciler(self.store, self.bridge)
         self._locks: dict[str, asyncio.Lock] = {}
         self._bridge_auto_checkin_off = False
@@ -81,10 +90,13 @@ class WorkBuddyService:
 
     async def aclose(self) -> None:
         await self.bridge.aclose()
+        await self.openbridge.aclose()
 
     async def refresh_catalog(self, *, force: bool = False) -> list[dict]:
         async with self._lock("catalog"):
-            return await self.catalog.refresh(force=force)
+            results = list(await self.catalog.refresh(force=force))
+            results.append(await self.openbridge_catalog.refresh())
+            return results
 
     async def refresh_accounts(self) -> list[dict]:
         async with self._lock("accounts"):
@@ -410,6 +422,9 @@ class WorkBuddyService:
         # 免费子集传给 cost_summary，导致 total 显示成免费数。
         costs = self.catalog.list_costs()
         free_models = [item for item in costs if item.get("free")]
+        openbridge_models = [
+            item for item in costs if str(item.get("provider") or "") == OPENBRIDGE_PROVIDER
+        ]
         cooldowns = [
             {
                 "account_id": account_id,
@@ -424,6 +439,10 @@ class WorkBuddyService:
             "available_credits": round(total_available, 4),
             "free_models": len(free_models),
             "models": len(costs),
+            "openbridge": {
+                "configured": self.openbridge.configured,
+                "models": len(openbridge_models),
+            },
             "sessions": len(self.store.list_sessions(limit=1000)),
             "cooldowns": cooldowns,
             "cost_summary": cost_summary(costs),

@@ -26,7 +26,7 @@ services:
     pull_policy: always
     ports:
       - "127.0.0.1:8787:8787"   # Buddy2api: WorkBuddy login + /v1 gateway
-      - "127.0.0.1:8788:8788"   # WorkBuddy pool console + /v1 gateway
+      - "127.0.0.1:8788:8788"   # Unified model gateway console + /v1
     volumes:
       - ./data:/data
     environment:
@@ -35,6 +35,15 @@ services:
       # 允许 Buddy2api 加载的多渠道；没有导入账号的通道会自动跳过。
       CB_GATEWAY_PROVIDERS: ${CB_GATEWAY_PROVIDERS:-workbuddy,workbuddy-i,qoder,qoder-i,qwenwork,traework}
       WORKBUDDY_PROVIDERS: ${WORKBUDDY_PROVIDERS:-workbuddy,workbuddy-i,qoder,qoder-i,qwenwork,traework}
+      # Optional standalone OpenBridge channel. Leave empty to disable.
+      OPENBRIDGE_URL: ${OPENBRIDGE_URL:-}
+      OPENBRIDGE_API_KEY: ${OPENBRIDGE_API_KEY:-}
+      OPENBRIDGE_MODELS: ${OPENBRIDGE_MODELS:-}
+      OPENBRIDGE_SUPPORTS_TOOL_CALL: ${OPENBRIDGE_SUPPORTS_TOOL_CALL:-true}
+      OPENBRIDGE_SUPPORTS_REASONING: ${OPENBRIDGE_SUPPORTS_REASONING:-true}
+      OPENBRIDGE_SUPPORTS_IMAGES: ${OPENBRIDGE_SUPPORTS_IMAGES:-false}
+      OPENBRIDGE_CONTEXT_WINDOW: ${OPENBRIDGE_CONTEXT_WINDOW:-128000}
+      OPENBRIDGE_MAX_OUTPUT: ${OPENBRIDGE_MAX_OUTPUT:-16384}
       CATALOGWATCH_ADMIN_USER: ${CATALOGWATCH_ADMIN_USER:-admin}
       CATALOGWATCH_ADMIN_PASSWORD: ${CATALOGWATCH_ADMIN_PASSWORD:-admin}
       CATALOGWATCH_ADMIN_TOKEN: ${CATALOGWATCH_ADMIN_TOKEN:-}

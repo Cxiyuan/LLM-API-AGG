@@ -1,4 +1,4 @@
-"""SQLite access for the WorkBuddy pool control plane.
+"""SQLite access for the unified model aggregation gateway.
 
 All methods use the pool Database's shared connection and write lock.
 Keep transactions short and never call HTTP while holding the lock.
@@ -1240,6 +1240,7 @@ class WorkBuddyStore:
             """
             SELECT * FROM pool_requests
              WHERE reconciled_at IS NULL
+               AND COALESCE(provider, '') <> 'openbridge'
                AND created_at <= ?
                AND (
                     status_code IS NOT NULL

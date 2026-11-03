@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--catalog-url",
         default=os.environ.get("CATALOGWATCH_URL", "http://127.0.0.1:8788"),
-        help="WorkBuddy pool base URL, used for a best-effort catalog refresh after login",
+        help="Unified gateway base URL, used for a best-effort catalog refresh after login",
     )
     args = parser.parse_args(argv)
 

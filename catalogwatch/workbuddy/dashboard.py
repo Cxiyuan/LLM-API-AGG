@@ -1,4 +1,4 @@
-"""Serve the single-page WorkBuddy pool console."""
+"""Serve the single-page unified model gateway console."""
 
 from __future__ import annotations
 

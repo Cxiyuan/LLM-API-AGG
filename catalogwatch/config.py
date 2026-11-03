@@ -7,7 +7,7 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class Settings:
-    """Runtime settings for the WorkBuddy pool.
+    """Runtime settings for the unified model aggregation gateway.
 
     The model plane has no provider catalog or API keys of its own: models come
     from the WorkBuddy bridge, and the bridge connection is configured through

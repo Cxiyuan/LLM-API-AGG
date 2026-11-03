@@ -1,7 +1,8 @@
-"""Unified WorkBuddy pool gateway.
+"""Unified multi-channel model gateway.
 
-External agents authenticate with a pool key. The gateway chooses a model and a
-strictly pinned account, forwards to Buddy2api, and records the attempt ledger.
+External agents authenticate with a pool key. The gateway chooses a model and
+channel, forwards to Buddy2api (with a pinned account) or OpenBridge, and
+records the attempt ledger.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import httpx
 
 from ..util import local_day, utcnow_iso
 from .bridge import BridgeError, BuddyBridge
+from .openbridge import OpenBridgeClient, OpenBridgeError
+from .providers import OPENBRIDGE_PROVIDER
 from .router import ALIASES, Attempt, PoolError, PoolIntent, PoolRouter, extract_intent
 from .store import WorkBuddyStore
 
@@ -198,6 +201,30 @@ def _usage(body: Any) -> dict:
     }
 
 
+def _response_tokens(result: object) -> int:
+    if not isinstance(result, dict):
+        return 0
+    choices = result.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return 0
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        return 0
+    chars = 0
+    for key in ("content", "reasoning_content"):
+        value = message.get(key)
+        if isinstance(value, str):
+            chars += len(value)
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            fn = call.get("function") if isinstance(call, dict) else None
+            if isinstance(fn, dict):
+                chars += len(str(fn.get("name") or ""))
+                chars += len(str(fn.get("arguments") or ""))
+    return max(1, chars // 4) if chars else 0
+
+
 def _routing(attempts: list[Attempt]) -> list[dict]:
     return [
         {
@@ -218,10 +245,13 @@ class PoolGateway:
         store: WorkBuddyStore,
         router: PoolRouter,
         bridge: BuddyBridge,
+        *,
+        openbridge: OpenBridgeClient | None = None,
     ):
         self.store = store
         self.router = router
         self.bridge = bridge
+        self.openbridge = openbridge
 
     # --------------------------------------------------------------- bookkeeping
 
@@ -268,6 +298,42 @@ class PoolGateway:
             routing=_routing(attempts),
         )
 
+    async def _post_chat(
+        self, attempt: Attempt, body: dict, headers: dict[str, str], endpoint: str
+    ) -> httpx.Response:
+        if attempt.provider == OPENBRIDGE_PROVIDER:
+            if endpoint == "responses":
+                raise OpenBridgeError(400, "OpenBridge does not expose /v1/responses")
+            if self.openbridge is None or not self.openbridge.configured:
+                raise OpenBridgeError(503, "OpenBridge channel is not configured")
+            return await self.openbridge.post_chat_with_headers(body, headers)
+        if endpoint == "responses":
+            return await self.bridge.post_responses_with_headers(body, headers)
+        return await self.bridge.post_chat_with_headers(body, headers)
+
+    async def _open_stream(
+        self, attempt: Attempt, body: dict, headers: dict[str, str], endpoint: str
+    ) -> httpx.Response:
+        if attempt.provider == OPENBRIDGE_PROVIDER:
+            if endpoint == "responses":
+                raise OpenBridgeError(400, "OpenBridge does not expose /v1/responses")
+            if self.openbridge is None or not self.openbridge.configured:
+                raise OpenBridgeError(503, "OpenBridge channel is not configured")
+            return await self.openbridge.open_chat_stream(body)
+        if endpoint == "responses":
+            return await self.bridge.open_responses_stream(body, headers)
+        return await self.bridge.open_chat_stream(body, headers)
+
+    @staticmethod
+    def _attempts_for_endpoint(
+        attempts: list[Attempt], endpoint: str
+    ) -> list[Attempt]:
+        if endpoint != "responses":
+            return attempts
+        # OpenBridge only implements Chat Completions; do not offer it for the
+        # Responses API (the caller would get an opaque 404 mid-request).
+        return [item for item in attempts if item.provider != OPENBRIDGE_PROVIDER]
+
     def _attempt_usable(self, intent: PoolIntent, attempt: Attempt) -> bool:
         """Skip candidates that failed earlier in this same request."""
         if intent.model in ALIASES and self.router.load.cooling(
@@ -281,7 +347,14 @@ class PoolGateway:
         return True
 
     @staticmethod
-    def _attempt_headers(attempt: Attempt, request_id: str, attempt_no: int) -> dict[str, str]:
+    def _attempt_headers(
+        attempt: Attempt,
+        request_id: str,
+        attempt_no: int,
+        session_id: str | None = None,
+    ) -> dict[str, str]:
+        if attempt.provider == OPENBRIDGE_PROVIDER:
+            return {"x-session-id": session_id} if session_id else {}
         if attempt.account is None:
             return {}
         return {
@@ -361,12 +434,16 @@ class PoolGateway:
             credits=credit,
             credits_estimated=0,
             effective_credits=attempt.effective_credits,
-            cost_source="upstream" if credit is not None else "pending",
+            cost_source=(
+                "quota"
+                if attempt.provider == OPENBRIDGE_PROVIDER
+                else ("upstream" if credit is not None else "pending")
+            ),
             status_code=status_code,
             finish_reason=usage.get("finish_reason"),
             attempts=attempt_no,
             duration_ms=latency_ms,
-            reconciled_at=None,
+            reconciled_at=(utcnow_iso() if attempt.provider == OPENBRIDGE_PROVIDER else None),
         )
         if key.get("id"):
             self.store.add_key_usage(
@@ -480,6 +557,10 @@ class PoolGateway:
                     self.store.delete_session(session_id)
             return
         if account_id is None:
+            # Accountless channels have no state row to cool; cool the model
+            # so the next auto pick falls through instead of hammering it.
+            if status_code in {429, 500, 502, 503, 504}:
+                self.router.load.cooldown(attempt.provider, attempt.model_id, 120)
             return
         if status_code == 429:
             state = self.store.get_state(account_id)
@@ -555,9 +636,15 @@ class PoolGateway:
         session_id: str | None = None,
     ) -> tuple[int, dict, dict[str, str]]:
         intent = extract_intent(payload)
-        attempts = self.router.plan(
-            intent, key, session_id=session_id
+        attempts = self._attempts_for_endpoint(
+            self.router.plan(intent, key, session_id=session_id), endpoint
         )
+        if not attempts:
+            raise PoolHTTPError(
+                503,
+                "no_attempt_succeeded",
+                f"No enabled channel supports endpoint {endpoint}",
+            )
         self._reserve(key)
         request_id = "wb-" + secrets.token_hex(12)
         self._start(
@@ -571,18 +658,15 @@ class PoolGateway:
                 continue
             body = dict(payload)
             body["model"] = attempt.wire_id
-            headers = self._attempt_headers(attempt, request_id, attempt_no)
+            headers = self._attempt_headers(attempt, request_id, attempt_no, session_id)
             self.router.load.enter(
                 attempt.provider,
                 attempt.model_id,
-                int(attempt.account["account_id"]),
+                int(attempt.account["account_id"]) if attempt.account else None,
             )
             started = time.monotonic()
             try:
-                if endpoint == "responses":
-                    response = await self.bridge.post_responses_with_headers(body, headers)
-                else:
-                    response = await self.bridge.post_chat_with_headers(body, headers)
+                response = await self._post_chat(attempt, body, headers, endpoint)
                 result = response.json()
             except asyncio.CancelledError:
                 latency = int((time.monotonic() - started) * 1000)
@@ -593,7 +677,7 @@ class PoolGateway:
                     latency_ms=latency,
                 )
                 raise
-            except BridgeError as exc:
+            except (BridgeError, OpenBridgeError) as exc:
                 last_error = exc
                 latency = int((time.monotonic() - started) * 1000)
                 self._failure(
@@ -646,6 +730,14 @@ class PoolGateway:
 
             latency = int((time.monotonic() - started) * 1000)
             usage = _usage(result)
+            if attempt.provider == OPENBRIDGE_PROVIDER and not usage.get("total_tokens"):
+                prompt = int(attempt.estimated_prompt_tokens or 0)
+                completion = _response_tokens(result)
+                usage.update(
+                    prompt_tokens=prompt,
+                    completion_tokens=completion,
+                    total_tokens=prompt + completion,
+                )
             self._success(
                 attempt=attempt,
                 request_id=request_id,
@@ -676,9 +768,15 @@ class PoolGateway:
         session_id: str | None = None,
     ) -> tuple[httpx.Response, Attempt, str, int, dict[str, str], int, dict]:
         intent = extract_intent(payload)
-        attempts = self.router.plan(
-            intent, key, session_id=session_id
+        attempts = self._attempts_for_endpoint(
+            self.router.plan(intent, key, session_id=session_id), endpoint
         )
+        if not attempts:
+            raise PoolHTTPError(
+                503,
+                "no_attempt_succeeded",
+                f"No enabled channel supports endpoint {endpoint}",
+            )
         self._reserve(key)
         request_id = "wb-" + secrets.token_hex(12)
         self._start(
@@ -691,18 +789,15 @@ class PoolGateway:
                 continue
             body = dict(payload)
             body["model"] = attempt.wire_id
-            headers = self._attempt_headers(attempt, request_id, attempt_no)
+            headers = self._attempt_headers(attempt, request_id, attempt_no, session_id)
             self.router.load.enter(
                 attempt.provider,
                 attempt.model_id,
-                int(attempt.account["account_id"]),
+                int(attempt.account["account_id"]) if attempt.account else None,
             )
             started = time.monotonic()
             try:
-                if endpoint == "responses":
-                    response = await self.bridge.open_responses_stream(body, headers)
-                else:
-                    response = await self.bridge.open_chat_stream(body, headers)
+                response = await self._open_stream(attempt, body, headers, endpoint)
             except asyncio.CancelledError:
                 latency = int((time.monotonic() - started) * 1000)
                 self._canceled(
@@ -712,7 +807,7 @@ class PoolGateway:
                     latency_ms=latency,
                 )
                 raise
-            except BridgeError as exc:
+            except (BridgeError, OpenBridgeError) as exc:
                 last_error = exc
                 latency = int((time.monotonic() - started) * 1000)
                 self._failure(
@@ -845,6 +940,7 @@ class PoolGateway:
         saw_done = False
         saw_finish = False
         saw_content = False
+        completion_chars = 0
         try:
             async for chunk in self._stream_with_heartbeat(response):
                 # Parse before yielding: a client may stop after the last content
@@ -885,6 +981,17 @@ class PoolGateway:
                                 or delta.get("tool_calls")
                             ):
                                 saw_content = True
+                                for text_key in ("content", "reasoning_content"):
+                                    delta_value = delta.get(text_key)
+                                    if isinstance(delta_value, str):
+                                        completion_chars += len(delta_value)
+                                tool_calls = delta.get("tool_calls")
+                                if isinstance(tool_calls, list):
+                                    for call in tool_calls:
+                                        fn = call.get("function") if isinstance(call, dict) else None
+                                        if isinstance(fn, dict):
+                                            completion_chars += len(str(fn.get("name") or ""))
+                                            completion_chars += len(str(fn.get("arguments") or ""))
                     if value.get("error"):
                         # Provider-level error delivered inside the stream. The
                         # client will see it too; record it so a 200-looking
@@ -989,6 +1096,14 @@ class PoolGateway:
                     duration_ms=latency,
                 )
                 return
+            if attempt.provider == OPENBRIDGE_PROVIDER and not last_usage.get("total_tokens"):
+                prompt = int(attempt.estimated_prompt_tokens or 0)
+                completion = max(1, completion_chars // 4) if completion_chars else 0
+                last_usage.update(
+                    prompt_tokens=prompt,
+                    completion_tokens=completion,
+                    total_tokens=prompt + completion,
+                )
             self._success(
                 attempt=attempt,
                 request_id=request_id,

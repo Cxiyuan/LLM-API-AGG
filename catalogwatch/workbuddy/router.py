@@ -14,7 +14,12 @@ from ..util import local_day, utcnow_iso
 from .catalog import WorkBuddyCatalog
 from .load import LoadTracker
 from .model_filter import is_text_chat_model, is_tool_capable_model
-from .providers import BRIDGE_PROVIDER_ORDER, BRIDGE_PROVIDERS
+from .providers import (
+    ACCOUNTLESS_PROVIDERS,
+    BRIDGE_PROVIDERS,
+    OPENBRIDGE_PROVIDER,
+    ROUTABLE_PROVIDER_ORDER,
+)
 from .schedule import (
     DEFAULT_DAY_PRIORITY,
     DEFAULT_NIGHT_PRIORITY,
@@ -92,6 +97,7 @@ class Attempt:
     free: bool
     effective_credits: float | None
     source: str = "workbuddy"
+    estimated_prompt_tokens: int = 0
 
 
 def _future(value: Any) -> bool:
@@ -262,18 +268,25 @@ class PoolRouter:
 
     @staticmethod
     def _wire_id(cost: dict) -> str:
-        return f"{cost.get('provider')}/{cost.get('model_id')}"
+        provider = str(cost.get("provider") or "")
+        model_id = str(cost.get("model_id") or "")
+        if provider == OPENBRIDGE_PROVIDER:
+            # OpenBridge expects its own ``provider/model`` id, without the
+            # aggregation prefix used by the unified gateway.
+            return model_id
+        return f"{provider}/{model_id}"
 
     def _candidates(self) -> list[dict]:
         """Every callable model resource from an enabled bridge channel."""
         costs: list[dict] = []
-        if self.store.list_accounts(present=True):
-            for item in self.catalog.list_costs():
-                if not item.get("present", True):
-                    continue
-                item = dict(item)
-                item["source"] = str(item.get("provider") or "workbuddy")
-                costs.append(item)
+        # Accountless channels (OpenBridge) can be usable with no bridge
+        # accounts, so do not gate the catalog on the Buddy2api account table.
+        for item in self.catalog.list_costs():
+            if not item.get("present", True):
+                continue
+            item = dict(item)
+            item["source"] = str(item.get("provider") or "workbuddy")
+            costs.append(item)
         return costs
 
     def policy(self) -> dict:
@@ -359,7 +372,7 @@ class PoolRouter:
 
         # Explicit bridge models may be newer than our catalog. Preserve the
         # request and let the bridge return its own error if the model is invalid.
-        providers = [provider] if provider else list(BRIDGE_PROVIDER_ORDER)
+        providers = [provider] if provider else list(ROUTABLE_PROVIDER_ORDER)
         return [
             {
                 "provider": item,
@@ -810,13 +823,35 @@ class PoolRouter:
                         models.append(other_models.pop(0))
 
         max_attempts = max(1, min(5, int(policy.get("max_attempts") or 3)))
-        used_pairs: set[tuple[int, str]] = set()
+        used_pairs: set[tuple[int | None, str]] = set()
         attempts: list[Attempt] = []
 
         for cost in models:
             provider = str(cost.get("provider"))
             model_id = str(cost.get("model_id"))
             wire_id = self._wire_id(cost)
+            if provider in ACCOUNTLESS_PROVIDERS:
+                pair = (None, model_id)
+                if pair in used_pairs:
+                    continue
+                used_pairs.add(pair)
+                attempts.append(
+                    Attempt(
+                        provider=provider,
+                        model_id=model_id,
+                        wire_id=wire_id,
+                        cost=cost,
+                        account=None,
+                        account_state={},
+                        free=bool(cost.get("free")),
+                        effective_credits=cost.get("credits"),
+                        source=provider,
+                        estimated_prompt_tokens=intent.estimated_prompt_tokens,
+                    )
+                )
+                if len(attempts) >= max_attempts:
+                    break
+                continue
             accounts = self._accounts_for(
                 provider,
                 cost,
@@ -842,6 +877,7 @@ class PoolRouter:
                         free=bool(cost.get("free")),
                         effective_credits=cost.get("credits"),
                         source=provider,
+                        estimated_prompt_tokens=intent.estimated_prompt_tokens,
                     )
                 )
                 if len(attempts) >= max_attempts:

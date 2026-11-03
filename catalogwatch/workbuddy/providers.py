@@ -7,8 +7,8 @@ imported account is simply skipped during catalog refresh.
 
 from __future__ import annotations
 
-#: Order matters for the console and for stable fallback lists.
-BRIDGE_PROVIDER_ORDER: tuple[str, ...] = (
+#: Buddy2api channels. Order matters for the console and fallback lists.
+BUDDY_PROVIDER_ORDER: tuple[str, ...] = (
     "workbuddy",
     "workbuddy-i",
     "qoder",
@@ -20,9 +20,20 @@ BRIDGE_PROVIDER_ORDER: tuple[str, ...] = (
 #: Providers whose catalog can be enriched by the WorkBuddy config endpoint.
 WORKBUDDY_PROVIDERS: tuple[str, ...] = ("workbuddy", "workbuddy-i")
 
+#: Standalone OpenAI-compatible channel. It has no bridge account table.
+OPENBRIDGE_PROVIDER = "openbridge"
+
+#: All providers the unified gateway may route to.
+ROUTABLE_PROVIDER_ORDER: tuple[str, ...] = BUDDY_PROVIDER_ORDER + (OPENBRIDGE_PROVIDER,)
+
 #: Channels billed by their own quota rather than WorkBuddy credits.
 QUOTA_PROVIDERS: frozenset[str] = frozenset(
-    provider for provider in BRIDGE_PROVIDER_ORDER if provider not in WORKBUDDY_PROVIDERS
+    provider
+    for provider in ROUTABLE_PROVIDER_ORDER
+    if provider not in WORKBUDDY_PROVIDERS
 )
 
-BRIDGE_PROVIDERS: frozenset[str] = frozenset(BRIDGE_PROVIDER_ORDER)
+#: Providers without a Buddy2api account pool.
+ACCOUNTLESS_PROVIDERS: frozenset[str] = frozenset({OPENBRIDGE_PROVIDER})
+
+BRIDGE_PROVIDERS: frozenset[str] = frozenset(ROUTABLE_PROVIDER_ORDER)

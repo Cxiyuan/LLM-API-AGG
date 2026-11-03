@@ -1,4 +1,4 @@
-/* LLM-API-AGG console: WorkBuddy account pool, costs, keys and ledger.
+/* LLM-API-AGG console: unified model gateway, accounts, costs, keys and ledger. */
    No external dependencies, no build step. */
 (() => {
   "use strict";
@@ -224,38 +224,41 @@
     const data = await api("/api/overview");
     const overview = data.overview || {};
     const bridge = data.bridge || {};
+    const openbridge = data.openbridge || {};
     const snapshot = data.config_snapshot || {};
     const warnings = [];
     // /health historically answered {"status":"ok"}; accept both shapes.
     const bridgeHealthy = bridge.ok === true || String(bridge.status || "").toLowerCase() === "ok";
     if (!bridgeHealthy) warnings.push("Buddy2api 不可达：" + (bridge.error || "unknown"));
-    if (snapshot.warning) warnings.push("WorkBuddy 目录：" + warningLabel(snapshot.warning));
-    if (!overview.accounts) warnings.push("没有可调用模型：请先在「WorkBuddy 账号」页登录账号");
+    if (snapshot.warning) warnings.push("模型目录：" + warningLabel(snapshot.warning));
+    if (!overview.accounts) warnings.push("没有可调用模型：请先在「资源账号」页登录或导入渠道账号");
     if (overview.cooldowns && overview.cooldowns.length) warnings.push("有 " + overview.cooldowns.length + " 个账号处于冷却/额度耗尽状态");
     setView(
       el(
         "div",
         {},
         card(
-          "LLM-API-AGG · WorkBuddy 池总览",
+          "LLM-API-AGG · 统一模型聚合网关总览",
           el(
             "div",
             { class: "grid" },
-            stat("WorkBuddy 账号", overview.accounts || 0),
+            stat("资源账号", overview.accounts || 0),
             stat("可用积分", num(overview.available_credits)),
-            stat("模型", overview.models || 0),
+            stat("渠道模型", overview.models || 0),
             stat("免费模型", overview.free_models || 0),
             stat("活跃会话", overview.sessions || 0)
           ),
           warnings.length ? el("div", {}, ...warnings.map((item) => el("p", { class: "warn", text: item }))) : el("p", { class: "ok", text: "运行正常" })
         ),
         card(
-          "Buddy2api",
+          "上游通道状态",
           el("pre", {}, JSON.stringify(bjDeep(bridge), null, 2)),
-          el("p", { class: "muted", text: "内部调试地址：http://127.0.0.1:8787/（仅本机）" })
+          el("p", { class: "muted", text: "Buddy2api 内部调试地址：http://127.0.0.1:8787/（仅本机）" }),
+          el("pre", {}, JSON.stringify(bjDeep(openbridge || {}), null, 2)),
+          el("p", { class: "muted", text: "OpenBridge 为可选渠道，通过 OPENBRIDGE_URL 接入。" })
         ),
         card(
-          "最近 WorkBuddy 目录快照",
+          "最近目录快照",
           el("pre", {}, JSON.stringify(bjDeep(snapshot || {}), null, 2))
         )
       )
@@ -392,7 +395,7 @@
       channelCred,
       el("p", {
         class: "muted",
-        text: "凭据只写入 Buddy2api 的加密数据库；本控制台不保存 token。容器跑在 Linux 时，千问办公需要在原生客户端登录后导出 token 再粘贴。",
+        text: "凭据只写入 Buddy2api 的加密数据库；本控制台不保存 token。容器跑在 Linux 时，千问办公需要在原生客户端登录后导出 token 再粘贴。OpenBridge 是独立 sidecar，通过 OPENBRIDGE_URL 接入，不在此页导入。",
       })
     );
 
@@ -715,7 +718,7 @@
         {},
         card(
           "全局自动签到",
-          el("p", { class: "muted", text: "默认关闭。开启后由 LLM-API-AGG 的调度器按账号规则执行；单独规则优先于全局规则。多账号自动签到可能违反 WorkBuddy 条款，存在限流/封号风险。" }),
+          el("p", { class: "muted", text: "默认关闭。开启后由 LLM-API-AGG 的调度器按账号规则执行；单独规则优先于全局规则。自动签到可能违反各上游平台条款，存在限流/封号风险。" }),
           el("div", { class: "form-grid" },
             el("label", { class: "field" }, "启用", genabled),
             el("label", { class: "field" }, "小时（0-23）", ghour),
@@ -929,7 +932,7 @@
         "调度策略",
         el("p", {
           class: "muted",
-          text: "全局生效：所有 WorkBuddy 账号的自动选路都按这里的白天/夜间优先级执行。"
+          text: "全局生效：统一网关会按这里设定的优先级，在 WorkBuddy 与 OpenBridge 等已启用渠道之间自动选路。"
             + " 当前时段：" + period + "；夜间时段 " + windowText + "。",
         }),
         el("p", { class: "muted", text: "账号均摊进度：" + providerText }),

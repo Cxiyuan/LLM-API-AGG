@@ -2,7 +2,7 @@
 #
 # One image, two processes (supervised):
 #   - Buddy2api: WorkBuddy browser/device login + OpenAI-compatible gateway (:8787)
-#   - WorkBuddy pool: multi-account console + /v1 gateway (:8788)
+#   - Unified gateway: multi-channel console + /v1 gateway (:8788)
 #
 # Publish both ports on the host loopback only. The bridge is an unofficial
 # personal-use integration; see THIRD_PARTY_NOTICES.md.

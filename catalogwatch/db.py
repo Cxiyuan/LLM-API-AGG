@@ -1,4 +1,4 @@
-"""SQLite access for the WorkBuddy pool control plane.
+"""SQLite access for the unified model aggregation gateway.
 
 The free-LLM catalog tables from earlier releases are deliberately not created
 or read here. Existing databases keep those tables untouched; only WorkBuddy
@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .workbuddy.providers import BRIDGE_PROVIDER_ORDER
+from .workbuddy.providers import ROUTABLE_PROVIDER_ORDER
 
 WORKBUDDY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS wb_accounts (
@@ -310,10 +310,10 @@ class Database:
                 "ALTER TABLE pool_requests ADD COLUMN cache_miss_tokens INTEGER NOT NULL DEFAULT 0"
             )
         # Ephemeral bindings to providers this platform no longer serves.
-        placeholders = ",".join("?" for _ in BRIDGE_PROVIDER_ORDER)
+        placeholders = ",".join("?" for _ in ROUTABLE_PROVIDER_ORDER)
         self.conn.execute(
             f"DELETE FROM pool_sessions WHERE provider NOT IN ({placeholders})",
-            BRIDGE_PROVIDER_ORDER,
+            ROUTABLE_PROVIDER_ORDER,
         )
 
     def close(self) -> None:

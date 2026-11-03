@@ -19,7 +19,7 @@ router = APIRouter(prefix="/v1")
 def _service(request: Request) -> WorkBuddyService:
     service = getattr(request.app.state, "workbuddy", None)
     if service is None:
-        raise HTTPException(status_code=503, detail="WorkBuddy pool is not initialized")
+        raise HTTPException(status_code=503, detail="model gateway is not initialized")
     return service
 
 

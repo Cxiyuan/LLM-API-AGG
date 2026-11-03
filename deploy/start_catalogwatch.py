@@ -3,7 +3,7 @@
 
 Buddy2api and the pool console start as separate supervisor programs. This
 wrapper waits for the bridge, provisions an internal gateway key (the /v1
-endpoints require one), then execs the WorkBuddy-only pool app.
+endpoints require one), then execs the unified model gateway app.
 """
 
 from __future__ import annotations
@@ -198,7 +198,7 @@ def main() -> None:
         )
         return
 
-    log(f"starting the WorkBuddy pool on 0.0.0.0:{port}")
+    log(f"starting the unified model gateway on 0.0.0.0:{port}")
     os.execvpe(
         "/opt/venv/bin/catalogwatch",
         ["catalogwatch", "serve", "--host", "0.0.0.0", "--port", port],
