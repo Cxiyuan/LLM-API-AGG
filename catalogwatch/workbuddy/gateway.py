@@ -559,7 +559,7 @@ class PoolGateway:
         if account_id is None:
             # Accountless channels have no state row to cool; cool the model
             # so the next auto pick falls through instead of hammering it.
-            if status_code in {429, 500, 502, 503, 504}:
+            if status_code in {0, 429, 500, 502, 503, 504}:
                 self.router.load.cooldown(attempt.provider, attempt.model_id, 120)
             return
         if status_code == 429:
