@@ -57,10 +57,10 @@ export CB_GATEWAY_AUTO_IMPORT="${CB_GATEWAY_AUTO_IMPORT:-0}"
 export CB_GATEWAY_ALLOW_UNAUTHENTICATED_API="${CB_GATEWAY_ALLOW_UNAUTHENTICATED_API:-0}"
 export CB_DOCKER=1
 export CATALOGWATCH_DB="${CATALOGWATCH_DB:-$DATA_DIR/catalogwatch/catalog.db}"
-export CATALOGWATCH_PORT="${CATALOGWATCH_PORT:-8790}"
+export CATALOGWATCH_PORT="${CATALOGWATCH_PORT:-8788}"
 export BUDDY2API_URL="${BUDDY2API_URL:-http://127.0.0.1:8787}"
-export UI_PORT="${UI_PORT:-8788}"
-export API_ORIGIN="${API_ORIGIN:-http://127.0.0.1:8790}"
+export UI_PORT="${UI_PORT:-8790}"
+export API_ORIGIN="${API_ORIGIN:-http://127.0.0.1:8788}"
 export APP_VERSION="${APP_VERSION:-2026.11}"
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONUNBUFFERED=1
@@ -69,8 +69,8 @@ cat <<EOF
 
 [entrypoint] data directory:  $DATA_DIR
 [entrypoint] WorkBuddy UI:   http://127.0.0.1:8787/  (bridge debug UI)
-[entrypoint] Web console:    http://127.0.0.1:8788/  (Hono + htmx)
-[entrypoint] Gateway API:    http://127.0.0.1:8790/  (internal; proxied by console)
+[entrypoint] Web console:    http://127.0.0.1:8790/  (Hono + htmx; publish as :80)
+[entrypoint] Gateway API:    http://127.0.0.1:8788/  (model API, unchanged)
 [entrypoint] Gateway health: http://127.0.0.1:8788/healthz
 [entrypoint] bridge admin:   $SECRETS_DIR/admin_token (or CB_GATEWAY_ADMIN_TOKEN)
 [entrypoint] console token:  $SECRETS_DIR/catalogwatch_admin_token (or CATALOGWATCH_ADMIN_TOKEN)

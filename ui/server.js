@@ -4,8 +4,8 @@ import { html, raw } from 'hono/html'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 
-const API_ORIGIN = (process.env.API_ORIGIN || 'http://127.0.0.1:8790').replace(/\/$/, '')
-const PORT = Number(process.env.UI_PORT || 8788)
+const API_ORIGIN = (process.env.API_ORIGIN || 'http://127.0.0.1:8788').replace(/\/$/, '')
+const PORT = Number(process.env.UI_PORT || 8790)
 const APP_VERSION = process.env.APP_VERSION || '2026.11'
 
 const app = new Hono()
@@ -360,7 +360,6 @@ async function proxy(c) {
 }
 
 app.all('/api/*', proxy)
-app.all('/v1/*', proxy)
 app.get('/healthz', proxy)
 app.get('/api/health', proxy)
 

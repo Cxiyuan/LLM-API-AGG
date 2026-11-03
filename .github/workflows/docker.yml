@@ -90,6 +90,7 @@ jobs:
           docker run -d --name free-llm-smoke \
             -p 127.0.0.1:18787:8787 \
             -p 127.0.0.1:18788:8788 \
+            -p 127.0.0.1:18790:8790 \
             -e CB_GATEWAY_ADMIN_TOKEN=smoke-admin-token \
             -v "$RUNNER_TEMP/appdata:/data" \
             free-llm-api:smoke
@@ -97,6 +98,7 @@ jobs:
           ready=0
           for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:18788/healthz >/dev/null 2>&1 \
+               && curl -fsS http://127.0.0.1:18790/healthz >/dev/null 2>&1 \
                && curl -fsS http://127.0.0.1:18787/health >/dev/null 2>&1; then
               ready=1
               break
@@ -118,11 +120,12 @@ jobs:
           curl -fsS -H "Authorization: Bearer $KEY" \
             http://127.0.0.1:18787/v1/models
 
-          # Console: Hono login page + admin session/token auth. `/` redirects
-          # to `/login` when unauthenticated, so probe the rendered page.
-          curl -fsS http://127.0.0.1:18788/login | grep -q "LLM-API-AGG"
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18788/)" = "303"
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18788/api/overview)" = "401"
+          # Console: Hono UI is on 8790 (host :80 in production), while the
+          # model API stays on 8788. `/` redirects to `/login` when unauthenticated.
+          curl -fsS http://127.0.0.1:18790/login | grep -q "LLM-API-AGG"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18790/)" = "303"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18790/api/overview)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18790/v1/models)" = "404"
           ADMIN="$(docker exec free-llm-smoke cat /data/secrets/catalogwatch_admin_token)"
           test -n "$ADMIN"
           curl -fsS -H "Authorization: Bearer $ADMIN" \

@@ -2,8 +2,8 @@
 #
 # One image, three processes (supervised):
 #   - Buddy2api: WorkBuddy browser/device login + OpenAI-compatible gateway (:8787)
-#   - Unified gateway: API + account/catalog scheduler (:8790, internal)
-#   - Hono/htmx console: enterprise UI + reverse proxy (:8788, public)
+#   - Unified gateway: API + account/catalog scheduler (:8788, public model API)
+#   - Hono/htmx console: enterprise UI (:8790 internal; host port 80)
 #
 # Publish both ports on the host loopback only. The bridge is an unofficial
 # personal-use integration; see THIRD_PARTY_NOTICES.md.
@@ -24,9 +24,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/app \
     DATA_DIR=/data \
     BUDDY2API_URL=http://127.0.0.1:8787 \
-    CATALOGWATCH_PORT=8790 \
-    UI_PORT=8788 \
-    API_ORIGIN=http://127.0.0.1:8790
+    CATALOGWATCH_PORT=8788 \
+    UI_PORT=8790 \
+    API_ORIGIN=http://127.0.0.1:8788
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -68,7 +68,7 @@ RUN chmod 0755 /app/deploy/entrypoint.sh /app/deploy/healthcheck.sh /app/deploy/
 
 VOLUME ["/data"]
 
-EXPOSE 8787 8788
+EXPOSE 8787 8788 8790
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD ["/app/deploy/healthcheck.sh"]

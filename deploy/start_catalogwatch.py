@@ -184,7 +184,7 @@ def main() -> None:
     db_path = env.setdefault(
         "CATALOGWATCH_DB", str(data_dir / "catalogwatch" / "catalog.db")
     )
-    port = env.get("CATALOGWATCH_PORT", "8790")
+    port = env.get("CATALOGWATCH_PORT", "8788")
 
     if env.get("CATALOGWATCH_BOOTSTRAP_DRY_RUN") == "1":
         print(
