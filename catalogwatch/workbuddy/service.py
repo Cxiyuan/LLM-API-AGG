@@ -7,6 +7,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from ..db import Database
@@ -66,9 +67,11 @@ class WorkBuddyService:
             self.store, self.bridge, providers=_configured_providers()
         )
         self.accounts = WorkBuddyAccounts(self.store, self.bridge)
+        self._bridge_timeout = bridge_timeout
+        openbridge_url, openbridge_key = self._openbridge_config()
         self.openbridge = OpenBridgeClient(
-            os.environ.get("OPENBRIDGE_URL", ""),
-            api_key=os.environ.get("OPENBRIDGE_API_KEY", ""),
+            openbridge_url,
+            api_key=openbridge_key,
             timeout=bridge_timeout,
         )
         self.openbridge_catalog = OpenBridgeCatalog(self.store, self.openbridge)
@@ -87,6 +90,64 @@ class WorkBuddyService:
             lock = asyncio.Lock()
             self._locks[key] = lock
         return lock
+
+    def _openbridge_config(self) -> tuple[str, str]:
+        stored_url = self.store.get_setting("openbridge_url", None)
+        url = (
+            stored_url
+            if stored_url is not None
+            else os.environ.get("OPENBRIDGE_URL", "")
+        )
+        stored_key = self.store.get_setting("openbridge_api_key", None)
+        key = (
+            stored_key
+            if stored_key is not None
+            else os.environ.get("OPENBRIDGE_API_KEY", "")
+        )
+        return str(url or "").strip().rstrip("/"), str(key or "").strip()
+
+    def openbridge_config(self) -> dict:
+        url, key = self._openbridge_config()
+        models = self.store.list_models(OPENBRIDGE_PROVIDER)
+        return {
+            "url": url,
+            "configured": bool(url),
+            "api_key_set": bool(key),
+            "models": len(models),
+            "source": "database" if self.store.get_setting("openbridge_url", None) is not None else "environment",
+        }
+
+    async def configure_openbridge(
+        self,
+        *,
+        url: str,
+        api_key: str | None = None,
+        clear_api_key: bool = False,
+    ) -> dict:
+        normalized = str(url or "").strip().rstrip("/")
+        if normalized:
+            parsed = urlparse(normalized)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("OpenBridge URL 必须是 http(s)://host[:port]")
+        self.store.set_setting("openbridge_url", normalized)
+        if clear_api_key:
+            self.store.set_setting("openbridge_api_key", "")
+        elif api_key is not None and str(api_key).strip():
+            self.store.set_setting("openbridge_api_key", str(api_key).strip())
+        _, key = self._openbridge_config()
+        old = self.openbridge
+        self.openbridge = OpenBridgeClient(
+            normalized,
+            api_key=key,
+            timeout=self._bridge_timeout,
+        )
+        self.openbridge_catalog.client = self.openbridge
+        self.gateway.openbridge = self.openbridge
+        try:
+            await old.aclose()
+        except Exception:  # noqa: BLE001 - old client may already be closed
+            pass
+        return self.openbridge_config()
 
     async def aclose(self) -> None:
         await self.bridge.aclose()

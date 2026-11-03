@@ -7,8 +7,6 @@ import { serveStatic } from '@hono/node-server/serve-static'
 const API_ORIGIN = (process.env.API_ORIGIN || 'http://127.0.0.1:8788').replace(/\/$/, '')
 const PORT = Number(process.env.UI_PORT || 8790)
 const APP_VERSION = process.env.APP_VERSION || '2026.11'
-const OPENBRIDGE_URL = (process.env.OPENBRIDGE_URL || '').replace(/\/$/, '')
-const OPENBRIDGE_API_KEY = (process.env.OPENBRIDGE_API_KEY || '').trim()
 
 const app = new Hono()
 
@@ -73,30 +71,20 @@ async function api(c, path, options = {}) {
   return data
 }
 
-async function openbridgeApi(path, options = {}) {
-  if (!OPENBRIDGE_URL) throw new ApiError('OPENBRIDGE_URL 未配置', 503)
-  const method = (options.method || 'GET').toUpperCase()
-  const headers = {}
-  if (OPENBRIDGE_API_KEY) headers.authorization = `Bearer ${OPENBRIDGE_API_KEY}`
-  if (options.body !== undefined) headers['content-type'] = 'application/json'
-  let response
-  try {
-    response = await fetch(`${OPENBRIDGE_URL}${path}`, {
-      method,
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    })
-  } catch (error) {
-    throw new ApiError(`OpenBridge 不可达：${error.message}`)
-  }
-  const text = await response.text()
-  let data = null
-  try { data = text ? JSON.parse(text) : null } catch { data = text }
-  if (!response.ok) {
-    const detail = data?.error?.message || data?.detail || data?.error || data
-    throw new ApiError(typeof detail === 'string' ? detail : JSON.stringify(detail || `HTTP ${response.status}`), response.status)
-  }
-  return data
+async function openbridgeConfig(c) {
+  return api(c, '/api/openbridge/config')
+}
+
+async function openbridgeApi(c, path, options = {}) {
+  const result = await api(c, '/api/openbridge/proxy', {
+    method: 'POST',
+    body: {
+      path,
+      method: (options.method || 'GET').toUpperCase(),
+      body: options.body === undefined ? null : options.body,
+    },
+  })
+  return result.data
 }
 
 async function sessionInfo(c) {
@@ -426,7 +414,7 @@ async function overviewBody(c) {
   if (!bridgeOk) warnings.push(`Buddy2api 不可达：${bridge.error || 'unknown'}`)
   if (!overview.accounts) warnings.push('还没有资源账号，请到「资源账号」登录或导入渠道凭据。')
   if (openbridge.configured && !openbridge.ok) warnings.push(`OpenBridge 不可达：${openbridge.error || 'unknown'}`)
-  if (!openbridge.configured) warnings.push('OpenBridge 未配置；设置 OPENBRIDGE_URL 后其模型会加入统一选路。')
+  if (!openbridge.configured) warnings.push('OpenBridge 未配置；可在「OpenBridge」页热配置连接地址。')
   if (overview.cooldowns?.length) warnings.push(`${overview.cooldowns.length} 个账号处于冷却或额度耗尽状态。`)
   return html`
     <section class="stat-grid">
@@ -564,7 +552,7 @@ function channelImportPanel() {
       <button class="button primary" type="submit">导入账号</button>
     </form>
     <div class="panel-divider"></div>
-    <p class="hint">OpenBridge 是独立 sidecar，不在这里导入；配置 OPENBRIDGE_URL 后自动加入统一路由。</p>
+    <p class="hint">OpenBridge 是独立 sidecar，不在这里导入；到「OpenBridge」页配置连接和会话包后自动加入统一路由。</p>
   </article>`
 }
 
@@ -740,45 +728,61 @@ app.get('/models', async (c) => {
 app.get('/openbridge', async (c) => {
   const session = await sessionInfo(c)
   if (!session) return c.redirect('/login', 303)
-  if (!OPENBRIDGE_URL) {
+  let config
+  try {
+    config = await openbridgeConfig(c)
+  } catch (error) {
+    return c.html(layout(c, { title: 'OpenBridge', active: 'openbridge', actor: session.actor, csrf: cookieValue(c, 'cw_csrf'), body: html`${pageTitle('OpenBridge', '浏览器会话渠道')}<div class="flash flash-bad">${error.message}</div>` }))
+  }
+  if (!config.configured) {
     const body = html`
       <article class="panel">
-        <div class="panel-head"><div><h2>OpenBridge 未配置</h2><p>可选浏览器会话渠道</p></div>${badge('未配置', 'neutral')}</div>
-        <div class="empty">
-          <p>先在部署环境设置 <code>OPENBRIDGE_URL</code>，然后重启容器。</p>
-          <pre class="json">OPENBRIDGE_URL=http://host.docker.internal:4318
-OPENBRIDGE_API_KEY=...</pre>
-          <p class="hint">OpenBridge 是独立 sidecar；启动后在这里创建 provider、导入 session package，网关会自动把它的模型加入 auto/free/cheap 选路。</p>
-        </div>
+        <div class="panel-head"><div><h2>接入 OpenBridge</h2><p>保存后立即生效，无需重启容器</p></div>${badge('未配置', 'neutral')}</div>
+        <form method="post" action="/actions/openbridge/config" class="stack">
+          <label class="field"><span>OpenBridge URL</span><input name="url" placeholder="http://host.docker.internal:4318" required></label>
+          <label class="field"><span>API Key（可选）</span><input name="api_key" type="password" placeholder="留空则不使用鉴权"></label>
+          <p class="hint">OpenBridge 服务需要已经启动；这里只保存网关侧的连接地址。保存后会自动加载 provider 与模型，无需重启。</p>
+          <button class="button primary" type="submit">保存并连接</button>
+        </form>
       </article>`
     return c.html(layout(c, { title: 'OpenBridge', active: 'openbridge', actor: session.actor, csrf: cookieValue(c, 'cw_csrf'), body: html`${pageTitle('OpenBridge', '浏览器会话渠道')}${body}` }))
   }
-
   let health = null
   let providers = []
   let models = []
   let loadError = ''
   try {
-    health = await openbridgeApi('/health')
+    health = await openbridgeApi(c, '/health')
   } catch (error) {
     loadError = error.message
   }
   if (!loadError) {
-    try { providers = (await openbridgeApi('/v1/providers')).providers || [] } catch (error) { loadError = error.message }
-    try { models = (await openbridgeApi('/v1/models')).data || [] } catch (error) { if (!loadError) loadError = error.message }
+    try { providers = (await openbridgeApi(c, '/v1/providers')).providers || [] } catch (error) { loadError = error.message }
+    try { models = (await openbridgeApi(c, '/v1/models')).data || [] } catch (error) { if (!loadError) loadError = error.message }
   }
   const statuses = new Map()
   await Promise.all(providers.map(async (provider) => {
     try {
-      statuses.set(provider.id, await openbridgeApi(`/v1/providers/${encodeURIComponent(provider.id)}/session-package`))
+      statuses.set(provider.id, await openbridgeApi(c, `/v1/providers/${encodeURIComponent(provider.id)}/session-package`))
     } catch {
       statuses.set(provider.id, null)
     }
   }))
   const body = html`
     ${loadError ? html`<div class="flash flash-bad">${loadError}</div>` : ''}
+    <article class="panel">
+      <div class="panel-head"><div><h2>连接配置</h2><p>保存后立即重连并刷新模型，无需重启容器</p></div>${config.api_key_set ? badge('已配置 Key', 'ok') : badge('无 Key', 'neutral')}</div>
+      <form method="post" action="/actions/openbridge/config" class="stack">
+        <div class="form-grid">
+          <label class="field"><span>OpenBridge URL（留空停用）</span><input name="url" value="${config.url}"></label>
+          <label class="field"><span>API Key</span><input name="api_key" type="password" placeholder="${config.api_key_set ? '留空保持现有 Key' : '可选'}"></label>
+        </div>
+        <label class="checkbox-field"><input type="checkbox" name="clear_api_key" value="1"><span>清除已保存的 API Key</span></label>
+        <button class="button primary" type="submit">保存并重连</button>
+      </form>
+    </article>
     <section class="stat-grid">
-      <article class="stat-card"><span>OpenBridge</span><strong>${health?.ok ? '在线' : '离线'}</strong><small>${OPENBRIDGE_URL}</small></article>
+      <article class="stat-card"><span>OpenBridge</span><strong>${health?.ok ? '在线' : '离线'}</strong><small>${config.url}</small></article>
       <article class="stat-card"><span>Provider</span><strong>${fmtInt(providers.length)}</strong><small>已安装渠道</small></article>
       <article class="stat-card"><span>模型</span><strong>${fmtInt(models.length)}</strong><small>公开模型</small></article>
       <article class="stat-card"><span>会话包</span><strong>${fmtInt([...statuses.values()].filter((x) => x?.hasSessionPackage).length)}</strong><small>已导入登录态</small></article>
@@ -1282,6 +1286,19 @@ async function refreshPoolCatalog(c) {
   }
 }
 
+app.post('/actions/openbridge/config', async (c) => runAction(c, '/openbridge', async () => {
+  const form = await c.req.parseBody()
+  const body = {
+    url: String(form.url || '').trim(),
+    clear_api_key: Boolean(form.clear_api_key),
+  }
+  if (form.api_key !== undefined && String(form.api_key).trim() !== '') {
+    body.api_key = String(form.api_key).trim()
+  }
+  const result = await api(c, '/api/openbridge/config', { method: 'PUT', body })
+  return result.config?.configured ? 'OpenBridge 已连接并刷新模型' : 'OpenBridge 已停用'
+}))
+
 app.post('/actions/openbridge/refresh', async (c) => runAction(c, '/openbridge', async () => {
   await refreshPoolCatalog(c)
   return 'OpenBridge 模型目录已同步到统一网关'
@@ -1292,7 +1309,7 @@ app.post('/actions/openbridge/providers/create', async (c) => runAction(c, '/ope
   let config
   try { config = JSON.parse(String(form.config || '{}')) } catch { throw new Error('Config 必须是 JSON 对象') }
   if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('Config 必须是 JSON 对象')
-  await openbridgeApi('/v1/providers', { method: 'POST', body: {
+  await openbridgeApi(c, '/v1/providers', { method: 'POST', body: {
     id: String(form.id || '').trim(), kind: String(form.kind || '').trim(),
     label: String(form.label || '').trim(), enabled: Boolean(form.enabled), config,
   } })
@@ -1302,7 +1319,7 @@ app.post('/actions/openbridge/providers/create', async (c) => runAction(c, '/ope
 
 app.post('/actions/openbridge/providers/:id/toggle', async (c) => runAction(c, '/openbridge', async () => {
   const form = await c.req.parseBody()
-  await openbridgeApi(`/v1/providers/${encodeURIComponent(c.req.param('id'))}`, {
+  await openbridgeApi(c, `/v1/providers/${encodeURIComponent(c.req.param('id'))}`, {
     method: 'PATCH', body: { enabled: String(form.enabled || '0') === '1' },
   })
   await refreshPoolCatalog(c)
@@ -1310,7 +1327,7 @@ app.post('/actions/openbridge/providers/:id/toggle', async (c) => runAction(c, '
 }))
 
 app.post('/actions/openbridge/providers/:id/delete', async (c) => runAction(c, '/openbridge', async () => {
-  await openbridgeApi(`/v1/providers/${encodeURIComponent(c.req.param('id'))}`, { method: 'DELETE' })
+  await openbridgeApi(c, `/v1/providers/${encodeURIComponent(c.req.param('id'))}`, { method: 'DELETE' })
   await refreshPoolCatalog(c)
   return 'Provider 已删除'
 }))
@@ -1322,7 +1339,7 @@ app.post('/actions/openbridge/session', async (c) => runAction(c, '/openbridge',
   let packageBody
   try { packageBody = JSON.parse(String(form.package || '{}')) } catch { throw new Error('Session Package 必须是 JSON 对象') }
   if (!packageBody || typeof packageBody !== 'object' || Array.isArray(packageBody)) throw new Error('Session Package 必须是 JSON 对象')
-  await openbridgeApi(`/v1/providers/${encodeURIComponent(provider)}/session-package`, { method: 'PUT', body: packageBody })
+  await openbridgeApi(c, `/v1/providers/${encodeURIComponent(provider)}/session-package`, { method: 'PUT', body: packageBody })
   await refreshPoolCatalog(c)
   return 'Session Package 已安装'
 }))

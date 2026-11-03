@@ -80,6 +80,37 @@ class OpenBridgeClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+    ) -> Any:
+        """Generic admin proxy used by the console.
+
+        OpenBridge's provider/session APIs are plain JSON; keeping this in one
+        place means the browser never receives the upstream auth key.
+        """
+        if not self.configured:
+            raise OpenBridgeError(0, "OPENBRIDGE_URL is not configured")
+        try:
+            response = await self._client.request(
+                method.upper(),
+                path,
+                headers=self._headers(),
+                json=payload if payload is not None else None,
+            )
+        except httpx.HTTPError as exc:
+            raise OpenBridgeError(0, f"OpenBridge request failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise OpenBridgeError(response.status_code, response.text[:500])
+        if not response.content:
+            return {}
+        try:
+            return response.json()
+        except ValueError:
+            return {"raw": response.text[:2000]}
+
     async def health(self) -> dict:
         if not self.configured:
             raise OpenBridgeError(0, "OPENBRIDGE_URL is not configured")

@@ -114,3 +114,25 @@ async def test_gateway_dispatches_to_openbridge(tmp_path):
     assert body["choices"][0]["message"]["content"] == "openbridge-ok"
     assert ob.calls and ob.calls[0][0]["model"] == "chat-qwen-ai/qwen3-max"
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_configure_openbridge_hot_reloads_client(tmp_path):
+    from catalogwatch.workbuddy.service import WorkBuddyService
+
+    db = Database(tmp_path / "catalog.db")
+    service = WorkBuddyService(db)
+    try:
+        result = await service.configure_openbridge(url="http://127.0.0.1:4319/")
+        assert result["configured"] is True
+        assert result["url"] == "http://127.0.0.1:4319"
+        assert service.openbridge.base_url == "http://127.0.0.1:4319"
+        assert service.openbridge_catalog.client is service.openbridge
+        assert service.gateway.openbridge is service.openbridge
+        with pytest.raises(ValueError):
+            await service.configure_openbridge(url="ftp://bad")
+        disabled = await service.configure_openbridge(url="")
+        assert disabled["configured"] is False
+    finally:
+        await service.aclose()
+        db.close()

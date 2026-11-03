@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from ..util import utcnow_iso
 from .bridge import BridgeError
+from .openbridge import OpenBridgeError
 from .auth import (
     clear_login_failures,
     clear_session_cookies,
@@ -107,6 +108,60 @@ async def logout(request: Request) -> JSONResponse:
 async def session(request: Request) -> dict:
     service, actor = _admin(request)
     return {"ok": True, "actor": actor}
+
+
+# --------------------------------------------------------------- openbridge
+
+@router.get("/openbridge/config")
+async def openbridge_config(request: Request) -> dict:
+    service, _actor = _admin(request)
+    return service.openbridge_config()
+
+
+@router.put("/openbridge/config")
+async def update_openbridge_config(request: Request) -> dict:
+    service, actor = _admin(request, mutation=True)
+    body = await _body(request)
+    try:
+        result = await service.configure_openbridge(
+            url=str(body.get("url") or ""),
+            api_key=(str(body["api_key"]) if "api_key" in body else None),
+            clear_api_key=bool(body.get("clear_api_key")),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        await service.refresh_catalog(force=True)
+    except Exception:  # noqa: BLE001 - config is saved; next scheduler retries
+        pass
+    _audit(service, actor, "openbridge.config", None, {"url": result.get("url"), "configured": result.get("configured")})
+    return {"ok": True, "config": result}
+
+
+@router.post("/openbridge/proxy")
+async def openbridge_proxy(request: Request) -> dict:
+    """Console-only proxy so the OpenBridge auth key never reaches the browser."""
+    service, _actor = _admin(request, mutation=True)
+    body = await _body(request)
+    path = str(body.get("path") or "").strip()
+    method = str(body.get("method") or "GET").upper()
+    if not (path == "/health" or path.startswith("/v1/")):
+        raise HTTPException(status_code=400, detail="invalid OpenBridge path")
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        raise HTTPException(status_code=400, detail="invalid OpenBridge method")
+    payload = body.get("body")
+    if payload is not None and not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="OpenBridge body must be an object")
+    if not service.openbridge.configured:
+        raise HTTPException(status_code=503, detail="OpenBridge 尚未配置")
+    try:
+        data = await service.openbridge.request(method, path, payload)
+    except OpenBridgeError as exc:
+        raise HTTPException(
+            status_code=exc.status_code if 400 <= exc.status_code < 600 else 502,
+            detail=str(exc),
+        ) from exc
+    return {"ok": True, "data": data}
 
 
 # ------------------------------------------------------------------ overview
